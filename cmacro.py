@@ -4,9 +4,14 @@ from __future__ import print_function
 
 import re
 import sys
+import argparse
+from pprint import pprint
 from bisect import bisect_left
 from collections import namedtuple
 
+
+###############################################################################
+## LEXING
 
 # This is our token class - it represents a single token in the input
 # file, along with its value, line and column.
@@ -189,6 +194,10 @@ def build_c_lexer():
     return lexer
 
 
+###############################################################################
+## ABSTRACT SYNTAX TREE
+
+
 class ASTNode(object):
     """ Root object for all AST nodes.
     """
@@ -225,6 +234,18 @@ class ASTNode(object):
         """ Returns an array of tokens that this AST node represents.
         """
         return [self.token]
+
+    @property
+    def type(self):
+        if self.token is None:
+            return None
+        return self.token.type
+
+    @property
+    def value(self):
+        if self.token is None:
+            return None
+        return self.token.value
 
     def __repr__(self):
         return "%s(%s)" % (self.__class__.__name__, self.token)
@@ -315,62 +336,58 @@ def print_ast(ast, depth=0, seen=None):
             print("%s: %s" % (x.token.type, x.token.value))
 
 
-def old_process_macros(ast):
-    """ Given an AST, process macros within it.
+###############################################################################
+## MACRO PROCESSING
+
+
+# TODO: add line number and column number here
+class MacroError(Exception):
+    pass
+
+
+class MacroNode(ASTNode):
+    """ Special sentinel node for macros.  Will throw an error if
+        it's converted to tokens, since this should not be placed
+        into the output AST.
+    """
+    def __init__(self, specifiers):
+        self.token = None
+        self.parent = None
+        self.parent_index = None
+
+        # The specifier is a single word, followed by some number of other
+        # words that act as filters.
+        self.name = specifiers[0]
+        self.filters = specifiers[1:]
+
+
+class MacroInstance(object):
+    """ This class represents a single 'case' arm of a macro, and the
+        associated information - match template, replacement template, and
+        (optionally) any toplevel tokens to add.
     """
 
-    def find_in_ast(node, cond, seen=None):
-        if seen is None:
-            seen = set()
+    def __init__(self, name, match, template, toplevel=None):
+        self.name = name
 
-        if node in seen:
-            raise RuntimeError("Loop detected: saw %r twice" % (node,))
+        self.matches = []
 
-        seen.add(node)
+        # Process match array.  We need to replace a sequence of nodes that are
+        # of the form '$ ( IDENTIFIER )' with a special 'macro' node.
+        for i in range(len(match)):
+            op_node = match[i]
 
-        # Is this node what we're looking for?
-        if node.token is not None and cond(node):
-            yield node
+            if (op_node.type == 'OPERATOR' and op_node.value == '$'):
+                block_node = match[i + 1]
 
-        # For each child of this node, recurse to it.
-        if isinstance(node, BlockNode):
-            for child in node.children:
-                yield from find_in_ast(child, cond, seen)
+                if (isinstance(block_node, BlockNode) and
+                    block_node.value == '(' and
+                    len(block_node.children) > 0 and
+                    all(x.type == 'IDENTIFIER' for x in block_node.children)):
 
-    for unode in find_in_ast(ast, lambda n: n.token.type == 'IDENTIFIER' and
-                                            n.token.value == 'unless'):
-
-        # Now, the first sibling of the 'unless' node should be an operator (
-        # node, representing the condition.
-        cond_node = unode.parent.children[unode.parent_index + 1]
-        if cond_node.token.type != 'OPERATOR' or cond_node.token.value != '(':
-            print('ERROR EXPANDING: %s is not a "(" node' % (cond_node,))
-            break
-
-        # Replace the 'unless' with an 'if'.
-        if_node = ASTNode(Token('IDENTIFIER', 'if', -1, -1),
-                          unode.parent,
-                          unode.parent_index)
-        unode.replace_with(if_node)
-
-        # Get the condition node, and replace:
-        #   operator(
-        #       children
-        #       )
-        # With:
-        #   operator(
-        #       operator !
-        #       operator(
-        #           children
-        #           )
-        #       )
-
-        new_cond_node = BlockNode(Token('OPERATOR', '(', -1, -1))
-        new_cond_node.children.append(ASTNode(Token('OPERATOR', '!', -1, -1)))
-        new_cond_node.children.append(cond_node)
-
-        # Replace old condition node with this new one.
-        unode.parent.children[unode.parent_index + 1] = new_cond_node
+                    # Matches!
+                    specifiers = [x.value for x in block_node.children]
+                    new_node = MacroNode(specifiers)
 
 
 def process_macros(ast):
@@ -437,9 +454,193 @@ def process_macros(ast):
     # more expansions to be performed, and then macros from higher levels are
     # applied (and so on, up to the root of the file).
 
-    # TODO: implement all that stuff above
+    # This is a helper function to parse a single 'case' arm of a macro.
+    def parse_case(block):
+        # The valid components are:
+        #   match {}
+        #   template {}
+        #   toplevel {}
+        match_block = None
+        template_block = None
+        toplevel_block = None
+
+        for i in range(0, len(block.children), 2):
+            id_node = block.children[i]
+            block_node = block.children[i + 1]
+
+            if (id_node.type != 'IDENTIFIER' or
+                id_node.value not in ['match', 'template', 'toplevel']):
+                raise MacroError(
+                    "Unknown %s token in case arm: %s" % (id_node.type,
+                                                          id_node.value)
+                )
+
+            if not (isinstance(block_node, BlockNode) and
+                    block_node.value == '{'):
+                raise MacroError(
+                    "Token following '%s' definition must be a curly brace "
+                    "block, not a %s node: %s" % (id_node.value,
+                                                  block_node.type,
+                                                  block_node.value)
+                )
+
+            if 'match' == id_node.value:
+                match_block = block_node
+            elif 'template' == id_node.value:
+                template_block = block_node
+            elif 'template' == id_node.value:
+                toplevel_block = block_node
+
+        # We must have a match and template blocks.
+        if match_block is None:
+            raise MacroError("No 'match' block found in case arm")
+        if template_block is None:
+            raise MacroError("No 'template' block found in case arm")
+
+        return match_block, template_block, toplevel_block
+
+    # This is a helper function to parse a macro block.  It will return a set
+    # of tuples (name, (match, template, toplevel))
+    def parse_macro(name, block):
+        macro_def = []
+
+        # Each item in the block should be a 'case' identifier, followed by a
+        # curly brace block.
+        for i in range(0, len(block.children), 2):
+            case_node = block.children[i]
+            block_node = block.children[i + 1]
+            if case_node.type != 'IDENTIFIER' or case_node.value != 'case':
+                raise MacroError(
+                    "Unknown %s token in macro definition: %s" % (
+                        case_node.type, case_node.value)
+                )
+
+            if not (isinstance(block_node, BlockNode) and
+                    block_node.value == '{'):
+                raise MacroError(
+                    "Token following 'case' definition must be a curly brace "
+                    "block, not a %s node: %s" % (block_node.type,
+                                                  block_node.value)
+                )
+
+            # All good.  Parse this 'case' node.
+            case_def = parse_case(block_node)
+            macro_def.append((name, case_def))
+
+        return macro_def
+
+    # This is a helper function that, given a sequence of macro tuples in the
+    # form (match, template, toplevel), will return all those that match the
+    # given tokens.
+    def find_match(macros, block, offset):
+        for match, _, _ in macros:
+            for i in range(offset, len(block)):
+                pass
+
+        # TODO
+        return False
+
+    # This function will walk the AST and actually process macros.  The
+    # 'macros' parameter is a list of lists, where each top-level list is all
+    # the macros in a given block, and the contents are macro objects.
+    def walk_ast(ast, macros):
+        # The macros for this level.
+        curr_macros = []
+
+        # Helper function to look for macros in this scope, and then all higher
+        # scopes.
+        def find_macro(search):
+            found = []
+
+            for name, macro in curr_macros:
+                if name == search:
+                    found.append(macro)
+
+            # Need to start from the end, since inner macros can shadow outer
+            # ones.
+            for level in reversed(macros):
+                for name, macro in level:
+                    if name == search:
+                        found.append(macro)
+
+            return found
+
+
+        i = 0
+        while True:
+            if i == len(ast.children):
+                break
+
+            node = ast.children[i]
+
+            # If this is a 'macro' identifier, we need to parse this macro.
+            if 'IDENTIFIER' == node.type and 'macro' == node.value:
+                # The next token should be an identifier that's the name.
+                name_node = ast.children[i + 1]
+                if name_node.type != 'IDENTIFIER':
+                    raise MacroError(
+                        "Expected token after 'macro' to be an identifier, but"
+                        " found a '%s' token instead: %s" % (name_node.type,
+                                                             name_node.value)
+                    )
+
+                # The token after both should be a curly-braced block.
+                block_node = ast.children[i + 2]
+                if not (isinstance(block_node, BlockNode) and
+                        block_node.value == '{'):
+                    raise MacroError(
+                        "Expected token after macro name to be a block, but "
+                        "found a '%s' token instead: %s" % (block_node.type,
+                                                            block_node.value)
+                    )
+
+                # If we get here, the macro is formed correctly.  We need to
+                # remove it from the AST so it doesn't get pretty-printed.
+                ast.children.pop(i + 2)
+                ast.children.pop(i + 1)
+                ast.children.pop(i)
+
+                # Process this macro node.
+                macro_defs = parse_macro(name_node.value, block_node)
+                curr_macros.extend(macro_defs)
+
+                # Back i up by 1, so that we re-process this position in the
+                # next loop (since the node was removed).
+                i -= 1
+
+            # Otherwise, check if this is a call to a macro.
+            elif 'IDENTIFIER' == node.type:
+                possible_matches = find_macro(node.value)
+                if len(possible_matches):
+                    print("Found call to macro: %s" % (node.value,))
+
+                    # This is an invokation of a macro that has been defined,
+                    # and 'macros' now contains all possible matches for that
+                    # macro.  We need to find the appropriate match.
+                    macro = find_match(possible_matches, ast.children, i + 1)
+                    if macro is None:
+                        raise MacroError(
+                            "Did not find a matching case for the macro '%s' "
+                            "(out of %d possible cases)" % (
+                                node.value, len(possible_matches))
+                        )
+
+
+
+            # Otherwise, if this is a block, we need to recurse into it.
+            elif isinstance(node, BlockNode) and node.value == '{':
+                walk_ast(node, macros + [curr_macros])
+
+            # Otherwise, do nothing.
+            i += 1
+
+    walk_ast(ast, [])
+
     return
 
+
+###############################################################################
+## PRETTY PRINTING
 
 
 def print_to_c(tokens):
@@ -480,7 +681,11 @@ def print_to_c(tokens):
                 print('\n' + ('    ' * block_depth), end='')
 
 
-def lex_c(text):
+###############################################################################
+## USER INTERFACE
+
+
+def lex_c(args):
     lexer = build_c_lexer()
     lexer.input(text)
 
@@ -493,15 +698,15 @@ def lex_c(text):
             t.value,
         ))
 
-    return
-
     ast = make_ast(tokens)
+    print("-" * 50)
     print("Before macro expansion:")
     print("-" * 50)
     print_ast(ast)
 
     process_macros(ast)
 
+    print("-" * 50)
     print("After macro expansion:")
     print("-" * 50)
     print_ast(ast)
@@ -509,7 +714,74 @@ def lex_c(text):
     print_to_c(ast.to_tokens())
 
 
+def do_expand(args):
+    fname, contents = get_file(args)
+
+    lexer = build_c_lexer()
+    lexer.input(contents)
+    tokens = list(lexer.tokens())
+
+    ast = make_ast(tokens)
+
+    process_macros(ast)
+
+    print_to_c(ast.to_tokens())
+
+
+def do_lex(args):
+    fname, contents = get_file(args)
+
+    lexer = build_c_lexer()
+    lexer.input(contents)
+    for t in lexer.tokens():
+        print("%s\t%d\t%d\t%s" % (
+            t.type,
+            t.line,
+            t.col,
+            t.value,
+        ))
+
+
+def get_file(args):
+    fname = args.file
+
+    if '-' == fname:
+        fname = "<stdin>"
+        text = sys.stdin.read()
+    else:
+        with open(fname, 'r') as f:
+            text = f.read()
+
+    return fname, text
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Macro processor for C')
+    subparsers = parser.add_subparsers()
+
+    # Global options.
+    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument('file', type=str, help='file to process')
+
+    # Add parser for 'lex' command, which just prints the tokens to stdout.
+    lex_parser = subparsers.add_parser('lex', parents=[parent_parser],
+                                       help='lex the input file, and print '
+                                            'tokens to stdout')
+    lex_parser.set_defaults(func=do_lex)
+
+
+    # Add parser for 'expand' command, which actually expands macros
+    expand_parser = subparsers.add_parser('expand', parents=[parent_parser],
+                                          help='expand macros in the input')
+    expand_parser.set_defaults(func=do_expand)
+
+    # Parse arguments.
+    args = parser.parse_args()
+    args.func(args)
+
+
 if __name__ == "__main__":
-    with open(sys.argv[1], 'r') as f:
-        text = f.read()
-    lex_c(text)
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
