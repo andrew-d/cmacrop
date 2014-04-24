@@ -189,44 +189,61 @@ def build_c_lexer():
     return lexer
 
 
-def make_tree(tokens):
-    # To make the (flat) set of tokens into a proper nested tree, we do the
-    # following:
-    #   - Loop through all the tokens until we hit an operator that's a
-    #     separator token.
+class ASTNode(object):
+    """ Root object for all AST nodes.
 
+        TODO: split this apart into individual types of nodes?
+    """
+
+    def __init__(self, token, parent=None):
+        self.token    = token
+        self.children = []
+        self.parent   = parent
+
+    def __repr__(self):
+        return "%s(%s)" % (self.__class__.__name__, self.token)
+
+
+def make_ast(tokens):
     OPENING_SEPARATORS = set("([{")
     CLOSING_SEPARATORS = set(")]}")
 
-    root_scope = []
-    scopes = [root_scope]
-    curr_scope = root_scope
+    root = ASTNode(None)
 
+    curr = root
     for token in tokens:
+        new_node = ASTNode(token, curr)
+        curr.children.append(new_node)
+
+        # Move up or down the scope hierarchy as necessary.
         if token.type == 'OPERATOR' and token.value in OPENING_SEPARATORS:
-            new_scope = [token]
-            scopes.append(new_scope)
-
-            curr_scope.append(new_scope)
-            curr_scope = new_scope
+            curr = new_node
         elif token.type == 'OPERATOR' and token.value in CLOSING_SEPARATORS:
-            curr_scope.append(token)
-            scopes.pop()
-            curr_scope = scopes[-1]
-        else:
-            curr_scope.append(token)
+            curr = curr.parent
 
-    return root_scope
+    return root
 
 
-def print_tree(tree, depth=0):
-    for x in tree:
-        if isinstance(x, list):
-            print_tree(x, depth + 1)
-        else:
-            if depth > 0:
-                print("-" * depth + ">", end='')
-            print("%s: %s" % (x.type, x.value))
+def print_ast(ast, depth=0):
+    for x in ast.children:
+        if depth > 0:
+            print("-" * depth + ">", end='')
+        print("%s: %s" % (x.token.type, x.token.value))
+
+        if len(x.children) > 0:
+            print_ast(x, depth + 1)
+
+
+def flatten_ast(ast, ret=None):
+    if ret is None:
+        ret = []
+
+    for node in ast.children:
+        ret.append(node.token)
+        if len(node.children):
+            flatten_ast(node, ret)
+
+    return ret
 
 
 def lex_c(text):
@@ -237,8 +254,11 @@ def lex_c(text):
     for t in tokens:
         print(t)
 
-    tree = make_tree(tokens)
-    print_tree(tree)
+    ast = make_ast(tokens)
+    print_ast(ast)
+
+    for t in flatten_ast(ast):
+        print(t)
 
 
 if __name__ == "__main__":
