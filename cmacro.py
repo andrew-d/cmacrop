@@ -315,7 +315,7 @@ def print_ast(ast, depth=0, seen=None):
             print("%s: %s" % (x.token.type, x.token.value))
 
 
-def process_macros(ast):
+def old_process_macros(ast):
     """ Given an AST, process macros within it.
     """
 
@@ -371,6 +371,75 @@ def process_macros(ast):
 
         # Replace old condition node with this new one.
         unode.parent.children[unode.parent_index + 1] = new_cond_node
+
+
+def process_macros(ast):
+    # In order to find macros, we need to look for an identifier 'macro',
+    # followed by the identifier 'unless', followed by a {} block.  We walk the
+    # entire AST and, for each of them, process the macros for that block.
+    # Note that:
+    #   - Macros are block scoped, like variables - they can only be used in
+    #     the block they're defined in or any lower block.
+    #   - Macros are processes from inside out, until they no longer have any
+    #     macros.  This means that in the following:
+    #
+    #       macro foo {
+    #           case {
+    #               match { $(test) }
+    #               template { bar( $(test) ) }
+    #           }
+    #       }
+    #       macro bar {
+    #           case {
+    #               match { $(test) }
+    #               template { if( $(test) ) }
+    #           }
+    #       }
+    #       macro baz {
+    #           case {
+    #               match { $(test) }
+    #               template { $(test) }
+    #           }
+    #       }
+    #
+    #
+    #       baz {
+    #           foo(true) {
+    #               a = 1;
+    #           }
+    #       }
+    #
+    # The expansion will be as follows:
+    #
+    #       baz {
+    #           bar( (true) ) {
+    #               a = 1;
+    #           }
+    #       }
+    #
+    # And then:
+    #
+    #       baz {
+    #           if( ( (true) ) ) {
+    #               a = 1;
+    #           }
+    #       }
+    #
+    # And then:
+    #
+    #       {
+    #           if( ( (true) ) ) {
+    #               a = 1;
+    #           }
+    #       }
+    #
+    # As you can see, inner macros are recursively expanded until there are no
+    # more expansions to be performed, and then macros from higher levels are
+    # applied (and so on, up to the root of the file).
+
+    # TODO: implement all that stuff above
+    return
+
 
 
 def print_to_c(tokens):
