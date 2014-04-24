@@ -46,7 +46,7 @@ class CLexer(object):
         "(" +
         hexadecimal_prefix + hexadecimal + "+" + int_suffixes + "?|" +
         positive_decimal_digits + decimal_digits + "*" + int_suffixes + "?|" +
-        "0" + octal_digits + "+" + int_suffixes + "?|" +
+        "0" + octal_digits + "*" + int_suffixes + "?|" +
         char_prefixes + r"?\'([^'\\\n]|" + escape_sequence + r")+\'"
         ")"
     )
@@ -103,5 +103,6 @@ if __name__ == "__main__":
         if tok is None:
             break
 
-        if tok.type != 'WHITESPACE':
+        #if tok.type != 'WHITESPACE':
+        if True:
             print(tok)
