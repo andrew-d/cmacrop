@@ -4,15 +4,19 @@ from __future__ import print_function
 
 import re
 import sys
+from bisect import bisect_left
 from collections import namedtuple
 
 
+# This is our token class - it represents a single token in the input
+# file, along with its value, line and column.
 Token = namedtuple('Token', 'type value line col')
 
 
 class LexerError(Exception):
-    def __init__(self, pos):
-        self.pos = pos
+    def __init__(self, line, col):
+        self.line = line
+        self.col  = col
 
 
 class Lexer(object):
@@ -50,11 +54,48 @@ class Lexer(object):
         self.skip_whitespace = skip_whitespace
         self.re_ws_skip = re.compile('\S')
 
-    def input(self, buf):
+    def input(self, buf, line_ending='\n'):
         """ Initialize the lexer with a buffer as input.
         """
         self.buf = buf
         self.pos = 0
+
+        # Search through the input and build a mapping of positions --> lines,
+        # with a virtual newline in the -1th position (i.e. at the start of the
+        # file).
+        matches = re.finditer(re.escape(line_ending), buf)
+        self.newlines = [-1] + sorted(m.start() for m in matches)
+
+    @property
+    def line(self):
+        """ Returns the current line number that we are at, as
+            determined by the value of self.pos
+        """
+
+        # We use the bisection algorithm to find the location of this position
+        # in our array of newlines.  bisect_left will return the position that
+        # is lower than any position in the array, and thus the line number
+        # (starting from 0).  However, since we've added the virtual newline
+        # above, the 0th entry in the array corresponds to the first line, and
+        # thus we don't need to do anything extra.
+        return bisect_left(self.newlines, self.pos)
+
+    @property
+    def col(self):
+        """ Returns the current column number that we are at, as
+            determined by the value of self.pos
+        """
+
+        # We need to find the line number...
+        line = self.line
+
+        # ... and use this to find the start of this line.  We subtract one
+        # from the current line number to get the position of the end of the
+        # previous line, which we then subtract from our position to get the
+        # column number.  Note that the subtraction includes the newline, which
+        # is okay since we want a 1-indexed column number.  For a 0-indexed
+        # value, we should subtract 1 to handle the newline.
+        return self.pos - self.newlines[line - 1]
 
     def token(self):
         """ Return the next token (a Token object) found in the
@@ -79,12 +120,12 @@ class Lexer(object):
             if m:
                 groupname = m.lastgroup
                 tok_type = self.group_type[groupname]
-                tok = Token(tok_type, m.group(groupname), self.pos, 0)
+                tok = Token(tok_type, m.group(groupname), self.line, self.col)
                 self.pos = m.end()
                 return tok
 
             # if we're here, no rule matched
-            raise LexerError(self.pos)
+            raise LexerError(self.line, self.col)
 
     def tokens(self):
         """ Returns an iterator to the tokens found in the buffer.
