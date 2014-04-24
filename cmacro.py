@@ -195,16 +195,63 @@ class ASTNode(object):
         TODO: split this apart into individual types of nodes?
     """
 
-    def __init__(self, token, parent=None):
-        self.token    = token
-        self.children = []
-        self.parent   = parent
+    def __init__(self, token, parent=None, parent_index=-1):
+        self.token        = token
+        self.children     = []
+
+        # Parent pointer
+        self.parent       = parent
+
+        # Index of this node in the parent's children array.  This is a helpful
+        # but non-required aid for when a macro requires us to touch a given
+        # node's siblings - which, as it turns out, is pretty common.
+        self.parent_index = parent_index
+
+    def clone(self):
+        """ Clone this AST and all subnodes, returning an entirely new node
+            that is a copy of this one.
+        """
+        new_self = ASTNode(self.token, self.parent)
+        new_self.children.extend(child.clone() for child in self.children)
+        return new_self
+
+    def _internal_flatten(self, ret):
+        for node in self.children:
+            ret.append(node.token)
+
+            if len(node.children):
+                node._internal_flatten(ret)
+
+        return ret
+
+    def flatten(self, include_self=False):
+        """ Flatten this AST and all subnodes into a token array.
+        """
+        ret = []
+        if include_self:
+            ret.append(self.token)
+
+        return self._internal_flatten(ret)
+
+    def replace_with(self, other):
+        """ Replace this node with another node.  Doesn't change the
+            identity of this node, but makes it an exact copy of
+            another node.
+        """
+        self.token        = other.token
+        self.children     = other.children
+        self.parent       = other.parent
+        self.parent_index = other.parent_index
 
     def __repr__(self):
         return "%s(%s)" % (self.__class__.__name__, self.token)
 
 
+# TODO: This isn't really an AST - we have all the individual tokens here,
+#       just organized as a tree structure.  There's probably a better way.
 def make_ast(tokens):
+    """ Make an AST from a sequence of tokens.
+    """
     OPENING_SEPARATORS = set("([{")
     CLOSING_SEPARATORS = set(")]}")
 
@@ -212,7 +259,7 @@ def make_ast(tokens):
 
     curr = root
     for token in tokens:
-        new_node = ASTNode(token, curr)
+        new_node = ASTNode(token, curr, len(curr.children))
         curr.children.append(new_node)
 
         # Move up or down the scope hierarchy as necessary.
@@ -224,26 +271,119 @@ def make_ast(tokens):
     return root
 
 
-def print_ast(ast, depth=0):
+def print_ast(ast, depth=0, seen=None):
+    """ Print an AST as a formatted tree.
+    """
+    if seen is None:
+        seen = set()
+
+    if ast in seen:
+        print("** loop: seen: %s" % (ast,))
+        return
+
+    seen.add(ast)
+
     for x in ast.children:
         if depth > 0:
             print("-" * depth + ">", end='')
         print("%s: %s" % (x.token.type, x.token.value))
 
         if len(x.children) > 0:
-            print_ast(x, depth + 1)
+            print_ast(x, depth + 1, seen)
 
 
-def flatten_ast(ast, ret=None):
-    if ret is None:
-        ret = []
+def process_macros(ast):
+    """ Given an AST, process macros within it.
+    """
 
-    for node in ast.children:
-        ret.append(node.token)
-        if len(node.children):
-            flatten_ast(node, ret)
+    def find_in_ast(node, cond, seen):
+        # If we've already seen this node, stop
+        # TODO: should error - no loops allowed
+        if node in seen:
+            return
+        seen.add(node)
 
-    return ret
+        # Is this node what we're looking for?
+        if node.token is not None and cond(node):
+            yield node
+
+        # For each child of this node, recurse to it.
+        for child in node.children:
+            yield from find_in_ast(child, cond, seen)
+
+    for unode in find_in_ast(ast, lambda n: n.token.type == 'IDENTIFIER' and
+                                            n.token.value == 'unless',
+                             set()):
+
+        # Now, the first sibling of the 'unless' node should be an operator (
+        # node, representing the condition.
+        cond_node = unode.parent.children[unode.parent_index + 1]
+        if cond_node.token.type != 'OPERATOR' or cond_node.token.value != '(':
+            print('ERROR EXPANDING: %s is not a "(" node' % (cond_node,))
+            break
+
+        # Replace the 'unless' with an 'if'.
+        if_node = ASTNode(Token('IDENTIFIER', 'if', -1, -1),
+                          unode.parent,
+                          unode.parent_index)
+        unode.replace_with(if_node)
+
+        # Get the condition node, and replace:
+        #   operator(
+        #       children
+        #       )
+        # With:
+        #   operator(
+        #       operator !
+        #       operator(
+        #           children
+        #           )
+        #       )
+
+        new_cond_node = ASTNode(Token('OPERATOR', '(', -1, -1))
+        new_cond_node.children.append(ASTNode(Token('OPERATOR', '!', -1, -1)))
+        new_cond_node.children.append(cond_node)
+        new_cond_node.children.append(ASTNode(Token('OPERATOR', ')', -1, -1)))
+
+        unode.parent.children[unode.parent_index + 1] = new_cond_node
+
+
+def print_to_c(tokens):
+    # Simple pretty-printing rules:
+    #   - If it's an opening curly brace, print a newline and increment depth
+    #   - If is's a closing curly brace, print a newline and decrement depth
+    #   - If it's a semicolon, print a newline unless we're in brackets.
+    #   - Don't print a space if:
+    #       - The next item is a comma or closing brace.
+    #       - The curren item is an opening brace.
+    #
+    # TODO: Rework printing cycle so we don't have closing curly braces
+    #       indented to the level of the inner block.
+    # TODO: Have a feature for adding #line directives, or similar, so we can
+    #       link back to the original source file.
+
+    block_depth = 0
+    brace_depth = 0
+
+    for i, tok in enumerate(tokens):
+        print(tok.value, end='')
+        if ((i < len(tokens) - 1 and tokens[i + 1].value not in [',', ')']) and
+            (tok.value != '(')):
+            print(' ', end='')
+
+        if tok.value == '(':
+            brace_depth += 1
+        elif tok.value == ')':
+            brace_depth -= 1
+
+        if tok.value in ['{', '}', ';']:
+            if tok.value == '{':
+                block_depth += 1
+            elif tok.value == '}':
+                block_depth -= 1
+
+            if brace_depth == 0:
+                print('\n' + ('    ' * block_depth), end='')
 
 
 def lex_c(text):
@@ -251,14 +391,21 @@ def lex_c(text):
     lexer.input(text)
 
     tokens = list(lexer.tokens())
-    for t in tokens:
-        print(t)
+    # for t in tokens:
+    #     print(t)
 
     ast = make_ast(tokens)
+    print("Before macro expansion:")
+    print("-" * 50)
     print_ast(ast)
 
-    for t in flatten_ast(ast):
-        print(t)
+    process_macros(ast)
+
+    print("After macro expansion:")
+    print("-" * 50)
+    print_ast(ast)
+
+    print_to_c(ast.flatten())
 
 
 if __name__ == "__main__":
