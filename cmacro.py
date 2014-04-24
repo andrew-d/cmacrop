@@ -191,13 +191,11 @@ def build_c_lexer():
 
 class ASTNode(object):
     """ Root object for all AST nodes.
-
-        TODO: split this apart into individual types of nodes?
     """
 
     def __init__(self, token, parent=None, parent_index=-1):
+        # Token represented by this AST.  Can be None.
         self.token        = token
-        self.children     = []
 
         # Parent pointer
         self.parent       = parent
@@ -208,30 +206,11 @@ class ASTNode(object):
         self.parent_index = parent_index
 
     def clone(self):
-        """ Clone this AST and all subnodes, returning an entirely new node
-            that is a copy of this one.
+        """ Clone this AST, returning an entirely new node that is a copy of
+            this one.
         """
-        new_self = ASTNode(self.token, self.parent)
-        new_self.children.extend(child.clone() for child in self.children)
+        new_self = ASTNode(self.token, self.parent, self.parent_index)
         return new_self
-
-    def _internal_flatten(self, ret):
-        for node in self.children:
-            ret.append(node.token)
-
-            if len(node.children):
-                node._internal_flatten(ret)
-
-        return ret
-
-    def flatten(self, include_self=False):
-        """ Flatten this AST and all subnodes into a token array.
-        """
-        ret = []
-        if include_self:
-            ret.append(self.token)
-
-        return self._internal_flatten(ret)
 
     def replace_with(self, other):
         """ Replace this node with another node.  Doesn't change the
@@ -239,34 +218,76 @@ class ASTNode(object):
             another node.
         """
         self.token        = other.token
-        self.children     = other.children
         self.parent       = other.parent
         self.parent_index = other.parent_index
+
+    def to_tokens(self):
+        """ Returns an array of tokens that this AST node represents.
+        """
+        return [self.token]
 
     def __repr__(self):
         return "%s(%s)" % (self.__class__.__name__, self.token)
 
 
-# TODO: This isn't really an AST - we have all the individual tokens here,
-#       just organized as a tree structure.  There's probably a better way.
+INVERSE_BLOCK_TOKEN = {
+    '(': ')',
+    ')': '(',
+    '[': ']',
+    ']': '[',
+    '{': '}',
+    '}': '{',
+}
+
+
+class BlockNode(ASTNode):
+    """ A type of AST node that can contain children.
+    """
+    def __init__(self, token, *args, **kwargs):
+        ASTNode.__init__(self, token, *args, **kwargs)
+
+        # Children contained by this node.
+        self.children = []
+
+    def to_tokens(self):
+        ret = []
+
+        if self.token is not None:
+            ret.append(self.token)
+
+        for child in self.children:
+            ret.extend(child.to_tokens())
+
+        # This is the implicit ending token for the block.
+        if self.token is not None:
+            ret.append(Token('OPERATOR',
+                             INVERSE_BLOCK_TOKEN[self.token.value],
+                             -1,
+                             -1))
+
+        return ret
+
+
 def make_ast(tokens):
     """ Make an AST from a sequence of tokens.
     """
     OPENING_SEPARATORS = set("([{")
     CLOSING_SEPARATORS = set(")]}")
 
-    root = ASTNode(None)
+    root = BlockNode(None)
 
     curr = root
     for token in tokens:
-        new_node = ASTNode(token, curr, len(curr.children))
-        curr.children.append(new_node)
-
-        # Move up or down the scope hierarchy as necessary.
         if token.type == 'OPERATOR' and token.value in OPENING_SEPARATORS:
+            new_node = BlockNode(token, curr, len(curr.children))
+            curr.children.append(new_node)
             curr = new_node
         elif token.type == 'OPERATOR' and token.value in CLOSING_SEPARATORS:
+            # Don't add a node - the block node will insert an implicit ending token.
             curr = curr.parent
+        else:
+            new_node = ASTNode(token, curr, len(curr.children))
+            curr.children.append(new_node)
 
     return root
 
@@ -286,21 +307,25 @@ def print_ast(ast, depth=0, seen=None):
     for x in ast.children:
         if depth > 0:
             print("-" * depth + ">", end='')
-        print("%s: %s" % (x.token.type, x.token.value))
 
-        if len(x.children) > 0:
+        if isinstance(x, BlockNode):
+            print("BLOCK: %s" % (x.token.value,))
             print_ast(x, depth + 1, seen)
+        else:
+            print("%s: %s" % (x.token.type, x.token.value))
 
 
 def process_macros(ast):
     """ Given an AST, process macros within it.
     """
 
-    def find_in_ast(node, cond, seen):
-        # If we've already seen this node, stop
-        # TODO: should error - no loops allowed
+    def find_in_ast(node, cond, seen=None):
+        if seen is None:
+            seen = set()
+
         if node in seen:
-            return
+            raise RuntimeError("Loop detected: saw %r twice" % (node,))
+
         seen.add(node)
 
         # Is this node what we're looking for?
@@ -308,12 +333,12 @@ def process_macros(ast):
             yield node
 
         # For each child of this node, recurse to it.
-        for child in node.children:
-            yield from find_in_ast(child, cond, seen)
+        if isinstance(node, BlockNode):
+            for child in node.children:
+                yield from find_in_ast(child, cond, seen)
 
     for unode in find_in_ast(ast, lambda n: n.token.type == 'IDENTIFIER' and
-                                            n.token.value == 'unless',
-                             set()):
+                                            n.token.value == 'unless'):
 
         # Now, the first sibling of the 'unless' node should be an operator (
         # node, representing the condition.
@@ -340,11 +365,11 @@ def process_macros(ast):
         #           )
         #       )
 
-        new_cond_node = ASTNode(Token('OPERATOR', '(', -1, -1))
+        new_cond_node = BlockNode(Token('OPERATOR', '(', -1, -1))
         new_cond_node.children.append(ASTNode(Token('OPERATOR', '!', -1, -1)))
         new_cond_node.children.append(cond_node)
-        new_cond_node.children.append(ASTNode(Token('OPERATOR', ')', -1, -1)))
 
+        # Replace old condition node with this new one.
         unode.parent.children[unode.parent_index + 1] = new_cond_node
 
 
@@ -391,8 +416,15 @@ def lex_c(text):
     lexer.input(text)
 
     tokens = list(lexer.tokens())
-    # for t in tokens:
-    #     print(t)
+    for t in tokens:
+        print("%s\t%d\t%d\t%s" % (
+            t.type,
+            t.line,
+            t.col,
+            t.value,
+        ))
+
+    return
 
     ast = make_ast(tokens)
     print("Before macro expansion:")
@@ -405,7 +437,7 @@ def lex_c(text):
     print("-" * 50)
     print_ast(ast)
 
-    print_to_c(ast.flatten())
+    print_to_c(ast.to_tokens())
 
 
 if __name__ == "__main__":
