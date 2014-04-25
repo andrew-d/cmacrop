@@ -208,11 +208,6 @@ class ASTNode(metaclass=abc.ABCMeta):
         self.__parent = parent
 
     @property
-    @abc.abstractproperty
-    def fields(self):
-        pass
-
-    @property
     def token(self):
         return self.__token
 
@@ -231,10 +226,6 @@ class IdentifierNode(ASTNode):
         self.__identifier = token.value
 
     @property
-    def fields(self):
-        return ['identifier']
-
-    @property
     def identifier(self):
         return self.__identifier
 
@@ -250,10 +241,6 @@ class IntConstantNode(ConstantNode):
         self.__value = token.value
 
     @property
-    def fields(self):
-        return ['value']
-
-    @property
     def value(self):
         return self.__value
 
@@ -263,10 +250,6 @@ class FloatConstantNode(ConstantNode):
         ASTNode.__init__(self, token, parent)
 
         self.__value = token.value
-
-    @property
-    def fields(self):
-        return ['value']
 
     @property
     def value(self):
@@ -280,10 +263,6 @@ class StringNode(ASTNode):
         self.__value = token.value
 
     @property
-    def fields(self):
-        return ['value']
-
-    @property
     def value(self):
         return self.__value
 
@@ -293,10 +272,6 @@ class OperatorNode(ASTNode):
         ASTNode.__init__(self, token, parent)
 
         self.__operator = token.value
-
-    @property
-    def fields(self):
-        return ['operator']
 
     @property
     def operator(self):
@@ -323,10 +298,6 @@ class BlockNode(ASTNode):
         self.__children = []
 
     @property
-    def fields(self):
-        return ['children', 'type']
-
-    @property
     def children(self):
         return self.__children
 
@@ -343,31 +314,28 @@ class RootNode(BlockNode):
         BlockNode.__init__(self, token=None, parent=None)
 
     @property
-    def fields(self):
-        return ['children']
+    def type(self):
+        return None
 
 
 class MacroNode(ASTNode):
-    """ Special sentinel node for macros.  Does not expose any fields.
+    """ Special sentinel node for macros.
     """
     def __init__(self, name, filters):
         ASTNode.__init__(self, token=None, parent=None)
 
         # The specifier is a single word, followed by some number of other
         # words that act as filters.
-        self.name = name
-        self.filters = filters
+        self.__name = name
+        self.__filters = filters
 
     @property
-    def fields(self):
-        return []
+    def name(self):
+        return self.__name
 
-
-def iter_fields(node):
-    """ Helper function that iterates over fields on a node.
-    """
-    for field in node.fields:
-        yield field, getattr(node, field)
+    @property
+    def filters(self):
+        return self.__filters
 
 
 class NodeVisitor(object):
@@ -382,13 +350,11 @@ class NodeVisitor(object):
         return visitor(node)
 
     def generic_visit(self, node):
-        for field, value in iter_fields(node):
-            if isinstance(value, list):
-                for item in value:
-                    if isinstance(item, ASTNode):
-                        self.visit(item)
-            elif isinstance(value, ASTNode):
-                self.visit(value)
+        if not isinstance(node, BlockNode):
+            return
+
+        for child in node.children:
+            self.visit(child)
 
 
 class NodeTransformer(NodeVisitor):
@@ -400,29 +366,21 @@ class NodeTransformer(NodeVisitor):
     """
 
     def generic_visit(self, node):
-        for field, old_value in iter_fields(node):
-            old_value = getattr(node, field, None)
+        if not isinstance(node, BlockNode):
+            return node
 
-            if isinstance(old_value, list):
-                new_values = []
-                for value in old_value:
-                    if isinstance(value, ASTNode):
-                        value = self.visit(value)
-                        if value is None:
-                            continue
-                        elif not isinstance(value, ASTNode):
-                            new_values.extend(value)
-                            continue
-                    new_values.append(value)
-                old_value[:] = new_values
+        new_children = []
+        for child in node.children:
+            value = self.visit(child)
+            if value is None:
+                continue
+            elif not isinstance(value, ASTNode):
+                new_children.extend(value)
+                continue
 
-            elif isinstance(old_value, ASTNode):
-                new_node = self.visit(old_value)
-                if new_node is None:
-                    delattr(node, field)
-                else:
-                    setattr(node, field, new_node)
+            new_children.append(value)
 
+        node.children[:] = new_children
         return node
 
 
@@ -474,38 +432,13 @@ class ASTPrinter(NodeVisitor):
         self.seen = set()
         self.depth = 0
 
-    def print_depth(self):
-        if self.depth > 0:
-            print(('-' * self.depth) + '>', end='')
-
-    def visit_StringNode(self, node):
-        self.print_depth()
-        print("STRING: %s" % (node.value,))
-
-    def visit_IdentifierNode(self, node):
-        self.print_depth()
-        print("IDENTIFIER: %s" % (node.identifier,))
-
-    def visit_IntConstantNode(self, node):
-        self.print_depth()
-        print("I_CONSTANT: %s" % (node.value,))
-
-    def visit_FloatConstantNode(self, node):
-        self.print_depth()
-        print("F_CONSTANT: %s" % (node.value,))
-
-    def visit_OperatorNode (self, node):
-        self.print_depth()
-        print("OPERATOR: %s" % (node.operator,))
-
-    def visit_BlockNode(self, node):
-        self.print_depth()
-        print("BLOCK: %s" % (node.type,))
-
-        # Need to visit this node to walk into it.
-        self.generic_visit(node)
-
     def generic_visit(self, node):
+        if node.token is not None:
+            if self.depth > 0:
+                print(('-' * self.depth) + '>', end='')
+
+            print('%s: %s' % (node.token.type, node.token.value))
+
         self.depth += 1
         NodeVisitor.generic_visit(self, node)
         self.depth -= 1
