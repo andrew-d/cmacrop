@@ -3,6 +3,7 @@
 from __future__ import print_function
 
 import re
+import abc
 import sys
 import argparse
 from pprint import pprint
@@ -198,57 +199,108 @@ def build_c_lexer():
 ## ABSTRACT SYNTAX TREE
 
 
-class ASTNode(object):
+class ASTNode(metaclass=abc.ABCMeta):
     """ Root object for all AST nodes.
     """
 
-    def __init__(self, token, parent=None, parent_index=-1):
-        # Token represented by this AST.  Can be None.
-        self.token        = token
-
-        # Parent pointer
-        self.parent       = parent
-
-        # Index of this node in the parent's children array.  This is a helpful
-        # but non-required aid for when a macro requires us to touch a given
-        # node's siblings - which, as it turns out, is pretty common.
-        self.parent_index = parent_index
-
-    def clone(self):
-        """ Clone this AST, returning an entirely new node that is a copy of
-            this one.
-        """
-        new_self = ASTNode(self.token, self.parent, self.parent_index)
-        return new_self
-
-    def replace_with(self, other):
-        """ Replace this node with another node.  Doesn't change the
-            identity of this node, but makes it an exact copy of
-            another node.
-        """
-        self.token        = other.token
-        self.parent       = other.parent
-        self.parent_index = other.parent_index
-
-    def to_tokens(self):
-        """ Returns an array of tokens that this AST node represents.
-        """
-        return [self.token]
+    def __init__(self, token, parent=None):
+        self.__token = token
+        self.__parent = parent
 
     @property
-    def type(self):
-        if self.token is None:
-            return None
-        return self.token.type
+    @abc.abstractproperty
+    def fields(self):
+        pass
 
     @property
-    def value(self):
-        if self.token is None:
-            return None
-        return self.token.value
+    def token(self):
+        return self.__token
+
+    @property
+    def parent(self):
+        return self.__parent
 
     def __repr__(self):
         return "%s(%s)" % (self.__class__.__name__, self.token)
+
+
+class IdentifierNode(ASTNode):
+    def __init__(self, token, parent=None):
+        ASTNode.__init__(self, token, parent)
+
+        self.__identifier = token.value
+
+    @property
+    def fields(self):
+        return ['identifier']
+
+    @property
+    def identifier(self):
+        return self.__identifier
+
+
+class ConstantNode(ASTNode):
+    pass
+
+
+class IntConstantNode(ConstantNode):
+    def __init__(self, token, parent=None):
+        ASTNode.__init__(self, token, parent)
+
+        self.__value = token.value
+
+    @property
+    def fields(self):
+        return ['value']
+
+    @property
+    def value(self):
+        return self.__value
+
+
+class FloatConstantNode(ConstantNode):
+    def __init__(self, token, parent=None):
+        ASTNode.__init__(self, token, parent)
+
+        self.__value = token.value
+
+    @property
+    def fields(self):
+        return ['value']
+
+    @property
+    def value(self):
+        return self.__value
+
+
+class StringNode(ASTNode):
+    def __init__(self, token, parent=None):
+        ASTNode.__init__(self, token, parent)
+
+        self.__value = token.value
+
+    @property
+    def fields(self):
+        return ['value']
+
+    @property
+    def value(self):
+        return self.__value
+
+
+class OperatorNode(ASTNode):
+    def __init__(self, token, parent=None):
+        ASTNode.__init__(self, token, parent)
+
+        self.__operator = token.value
+
+    @property
+    def fields(self):
+        return ['operator']
+
+    @property
+    def operator(self):
+        return self.__operator
 
 
 INVERSE_BLOCK_TOKEN = {
@@ -264,40 +316,114 @@ INVERSE_BLOCK_TOKEN = {
 class BlockNode(ASTNode):
     """ A type of AST node that can contain children.
     """
-    def __init__(self, token, *args, **kwargs):
-        ASTNode.__init__(self, token, *args, **kwargs)
+    def __init__(self, token, parent=None):
+        ASTNode.__init__(self, token, parent)
 
         # Children contained by this node.
-        self.children = []
+        self.__children = []
 
-    def clone(self, recursive=True):
-        # Clone ourselves.
-        new_self = BlockNode(self.token, self.parent, self.parent_index)
+    @property
+    def fields(self):
+        return ['children', 'type']
 
-        # Clone children.
-        if recursive:
-            for child in self.children:
-                new_self.children.append(child.clone())
+    @property
+    def children(self):
+        return self.__children
 
-        return new_self
+    @property
+    def type(self):
+        return self.token.value
 
-    def to_tokens(self):
-        ret = []
 
-        if self.token is not None:
-            ret.append(self.token)
+class RootNode(BlockNode):
+    """ A special block node that represents the root of the AST.  Hides the
+        'type' field from the parent BlockNode.
+    """
+    def __init__(self):
+        BlockNode.__init__(self, token=None, parent=None)
 
-        for child in self.children:
-            ret.extend(child.to_tokens())
+    @property
+    def fields(self):
+        return ['children']
 
-        # This is the implicit ending token for the block.
-        if self.token is not None:
-            ret.append(Token('OPERATOR',
-                             INVERSE_BLOCK_TOKEN[self.token.value],
-                             -1,
-                             -1))
 
-        return ret
+class MacroNode(ASTNode):
+    """ Special sentinel node for macros.  Does not expose any fields.
+    """
+    def __init__(self, name, filters):
+        ASTNode.__init__(self, token=None, parent=None)
+
+        # The specifier is a single word, followed by some number of other
+        # words that act as filters.
+        self.name = name
+        self.filters = filters
+
+    @property
+    def fields(self):
+        return []
+
+
+def iter_fields(node):
+    """ Helper function that iterates over fields on a node.
+    """
+    for field in node.fields:
+        yield field, getattr(node, field)
+
+
+class NodeVisitor(object):
+    """ A node visitor that walks each node in the AST and calls visitor
+        methods for every node found.
+
+        Modeled after the Python standard library's ast.NodeVisitor
+    """
+    def visit(self, node):
+        method = "visit_" + node.__class__.__name__
+        visitor = getattr(self, method, self.generic_visit)
+        return visitor(node)
+
+    def generic_visit(self, node):
+        for field, value in iter_fields(node):
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, ASTNode):
+                        self.visit(item)
+            elif isinstance(value, ASTNode):
+                self.visit(value)
+
+
+class NodeTransformer(NodeVisitor):
+    """ A subclass of the node visitor that allows modifying the AST as it's
+        traversed.  Returning a value from a visitor function will replace that
+        node in the AST with the returned value.
+
+        Modeled after the Python standard library's ast.NodeTransformer
+    """
+
+    def generic_visit(self, node):
+        for field, old_value in iter_fields(node):
+            old_value = getattr(node, field, None)
+
+            if isinstance(old_value, list):
+                new_values = []
+                for value in old_value:
+                    if isinstance(value, ASTNode):
+                        value = self.visit(value)
+                        if value is None:
+                            continue
+                        elif not isinstance(value, ASTNode):
+                            new_values.extend(value)
+                            continue
+                    new_values.append(value)
+                old_value[:] = new_values
+
+            elif isinstance(old_value, ASTNode):
+                new_node = self.visit(old_value)
+                if new_node is None:
+                    delattr(node, field)
+                else:
+                    setattr(node, field, new_node)
+
+        return node
 
 
 def make_ast(tokens):
@@ -306,47 +432,89 @@ def make_ast(tokens):
     OPENING_SEPARATORS = set("([{")
     CLOSING_SEPARATORS = set(")]}")
 
-    root = BlockNode(None)
+    root = RootNode()
 
     curr = root
     for token in tokens:
-        if token.type == 'OPERATOR' and token.value in OPENING_SEPARATORS:
-            new_node = BlockNode(token, curr, len(curr.children))
-            curr.children.append(new_node)
-            curr = new_node
-        elif token.type == 'OPERATOR' and token.value in CLOSING_SEPARATORS:
-            # Don't add a node - the block node will insert an implicit ending token.
-            curr = curr.parent
+        if token.type == 'OPERATOR':
+            if token.value in OPENING_SEPARATORS:
+                new_node = BlockNode(token, curr)
+                curr.children.append(new_node)
+                curr = new_node
+
+            elif token.value in CLOSING_SEPARATORS:
+                # Don't add a node - the parent block node will insert an
+                # implicit ending token when we're re-serializing the AST.
+                curr = curr.parent
+
+            else:
+                # Create an operator node.
+                curr.children.append(OperatorNode(token, curr))
+
+        elif token.type == 'IDENTIFIER':
+            curr.children.append(IdentifierNode(token, curr))
+
+        elif token.type == 'STRING':
+            curr.children.append(StringNode(token, curr))
+
+        elif token.type == 'I_CONSTANT':
+            curr.children.append(IntConstantNode(token, curr))
+
+        elif token.type == 'F_CONSTANT':
+            curr.children.append(FloatConstantNode(token, curr))
+
         else:
-            new_node = ASTNode(token, curr, len(curr.children))
-            curr.children.append(new_node)
+            raise RuntimeError("Unknown token type: %s" % (token.type,))
 
     return root
 
 
-def print_ast(ast, depth=0, seen=None):
+class ASTPrinter(NodeVisitor):
+    def __init__(self):
+        self.seen = set()
+        self.depth = 0
+
+    def print_depth(self):
+        if self.depth > 0:
+            print(('-' * self.depth) + '>', end='')
+
+    def visit_StringNode(self, node):
+        self.print_depth()
+        print("STRING: %s" % (node.value,))
+
+    def visit_IdentifierNode(self, node):
+        self.print_depth()
+        print("IDENTIFIER: %s" % (node.identifier,))
+
+    def visit_IntConstantNode(self, node):
+        self.print_depth()
+        print("I_CONSTANT: %s" % (node.value,))
+
+    def visit_FloatConstantNode(self, node):
+        self.print_depth()
+        print("F_CONSTANT: %s" % (node.value,))
+
+    def visit_OperatorNode (self, node):
+        self.print_depth()
+        print("OPERATOR: %s" % (node.operator,))
+
+    def visit_BlockNode(self, node):
+        self.print_depth()
+        print("BLOCK: %s" % (node.type,))
+
+        # Need to visit this node to walk into it.
+        self.generic_visit(node)
+
+    def generic_visit(self, node):
+        self.depth += 1
+        NodeVisitor.generic_visit(self, node)
+        self.depth -= 1
+
+
+def print_ast(ast):
     """ Print an AST as a formatted tree.
     """
-    if seen is None:
-        seen = set()
-
-    if ast in seen:
-        print("** loop: seen: %s" % (ast,))
-        return
-
-    seen.add(ast)
-
-    for x in ast.children:
-        if depth > 0:
-            print("-" * depth + ">", end='')
-
-        if isinstance(x, BlockNode):
-            print("BLOCK: %s" % (x.token.value,))
-            print_ast(x, depth + 1, seen)
-        elif isinstance(x, MacroNode):
-            print("MACRO VARIABLE: %s" % (x.name,))
-        else:
-            print("%s: %s" % (x.token.type, x.token.value))
+    ASTPrinter().visit(ast)
 
 
 ###############################################################################
@@ -420,31 +588,6 @@ def strip_macros(ast):
 
     walk_ast(ast)
     return ast, macros
-
-
-class MacroNode(ASTNode):
-    """ Special sentinel node for macros.  Will throw an error if
-        it's converted to tokens, since this should not be placed
-        into the output AST.
-    """
-    def __init__(self, name, filters):
-        self.token = None
-        self.parent = None
-        self.parent_index = None
-
-        # The specifier is a single word, followed by some number of other
-        # words that act as filters.
-        self.name = name
-        self.filters = filters
-
-    def to_tokens(self):
-        raise RuntimeError("Tried to call to_tokens() on MacroNode")
-
-    def clone(self):
-        raise RuntimeError("Tried to call clone() on MacroNode")
-
-    def replace_with(self, other):
-        raise RuntimeError("Tried to call replace_with() on MacroNode")
 
 
 class MacroCase(object):
@@ -1000,6 +1143,17 @@ def do_expand(args):
     print_to_c(ast.to_tokens())
 
 
+def do_print_ast(args):
+    fname, contents = get_file(args)
+
+    lexer = build_c_lexer()
+    lexer.input(contents)
+    tokens = list(lexer.tokens())
+
+    ast = make_ast(tokens)
+    print_ast(ast)
+
+
 def do_lex(args):
     fname, contents = get_file(args)
 
@@ -1035,17 +1189,20 @@ def main():
     parent_parser = argparse.ArgumentParser(add_help=False)
     parent_parser.add_argument('file', type=str, help='file to process')
 
-    # Add parser for 'lex' command, which just prints the tokens to stdout.
     lex_parser = subparsers.add_parser('lex', parents=[parent_parser],
                                        help='lex the input file, and print '
                                             'tokens to stdout')
     lex_parser.set_defaults(func=do_lex)
 
 
-    # Add parser for 'expand' command, which actually expands macros
     expand_parser = subparsers.add_parser('expand', parents=[parent_parser],
                                           help='expand macros in the input')
     expand_parser.set_defaults(func=do_expand)
+
+    print_ast_parser = subparsers.add_parser('print_ast',
+                                             parents=[parent_parser],
+                                             help='build and print the AST')
+    print_ast_parser.set_defaults(func=do_print_ast)
 
     # Parse arguments.
     args = parser.parse_args()
