@@ -459,68 +459,69 @@ class MacroError(Exception):
     pass
 
 
-def strip_macros(ast):
-    """ Strip all macro definitions from the AST and return them as a seperate
-        array, along with the AST itself (now lacking macros).
-    """
+class MacroStripper(NodeTransformer):
+    def __init__(self):
+        # Format [(name, block), ...]
+        self.macro_blocks = []
 
-    # Clone the AST so we don't modify it.
-    ast = ast.clone()
-
-    macros = []
-
-    def walk_ast(ast):
+    def visit_BlockNode(self, node):
         i = 0
         while True:
-            if i == len(ast.children):
+            # Need to recalculate this on every loop, since it will change.
+            if i > (len(node.children) - 3):
                 break
 
-            node = ast.children[i]
+            ch = node.children[i]
 
             # If this is a 'macro' identifier, we need to parse this macro.
-            if 'IDENTIFIER' == node.type and 'macro' == node.value:
+            if isinstance(ch, IdentifierNode) and ch.identifier == 'macro':
                 # The next token should be an identifier that's the name.
-                name_node = ast.children[i + 1]
-                if name_node.type != 'IDENTIFIER':
-                    raise MacroError(
-                        "Expected token after 'macro' to be an identifier, but"
-                        " found a '%s' token instead: %s" % (name_node.type,
-                                                             name_node.value)
-                    )
+                name_node = node.children[i + 1]
+                if not isinstance(name_node, IdentifierNode):
+                    err = ("Expected token after 'macro' to be an identifier, "
+                           "but found a '%s' token instead: %s")
+                    raise MacroError(err % (name_node.token.type,
+                                            name_node.token.value))
 
                 # The token after both should be a curly-braced block.
-                block_node = ast.children[i + 2]
-                if not (isinstance(block_node, BlockNode) and
-                        block_node.value == '{'):
-                    raise MacroError(
-                        "Expected token after macro name to be a block, but "
-                        "found a '%s' token instead: %s" % (block_node.type,
-                                                            block_node.value)
-                    )
+                bnode = node.children[i + 2]
+                if not (isinstance(bnode, BlockNode) and bnode.type == '{'):
+                    err = ("Expected token after name to be a block, but "
+                           "found a '%s' token instead: %s")
+                    raise MacroError(err % (bnode.token.type,
+                                            bnode.token.value))
 
                 # If we get here, the macro is formed correctly.  We need to
-                # remove it from the AST.
-                ast.children.pop(i + 2)
-                ast.children.pop(i + 1)
-                ast.children.pop(i)
+                # remove the three containing nodes from the AST.
+                node.children.pop(i + 2)
+                node.children.pop(i + 1)
+                node.children.pop(i)
 
-                # Add this macro to the return array.  Note that we also add
-                # the index to the array, so we can track where in the
-                # children array the macro was defined.
-                macros.append((name_node.value, block_node, i))
+                # Add this macro to the return array.
+                self.macro_blocks.append((name_node.identifier, bnode))
 
                 # Back i up by 1, so that we re-process this position in the
                 # next loop (since the node was removed).
                 i -= 1
 
-            # Otherwise, if this is a block, we need to recurse into it.
-            elif isinstance(node, BlockNode):
-                walk_ast(node)
-
             i += 1
 
-    walk_ast(ast)
-    return ast, macros
+        # Now that we've stripped all macros, we need to recurse.
+        return self.generic_visit(node)
+
+    def visit_RootNode(self, node):
+        # Root nodes are also blocks.
+        return self.visit_BlockNode(node)
+
+
+def strip_macros(ast):
+    """ Strip all macro definitions from the AST and return them as a seperate
+        array, along with the AST itself (now lacking macros).
+    """
+    sp = MacroStripper()
+    sp.visit(ast)
+
+    return ast, sp.macro_blocks
 
 
 class MacroCase(object):
@@ -1084,7 +1085,30 @@ def do_print_ast(args):
     tokens = list(lexer.tokens())
 
     ast = make_ast(tokens)
+
+    if args.strip_macros:
+        strip_macros(ast)
+
     print_ast(ast)
+
+
+def do_print_macros(args):
+    fname, contents = get_file(args)
+
+    lexer = build_c_lexer()
+    lexer.input(contents)
+    tokens = list(lexer.tokens())
+
+    ast = make_ast(tokens)
+    ast, macros = strip_macros(ast)
+
+    # TODO: parse the macros before printing them
+
+    for name, macro in macros:
+        print("Macro '%s'" % (name,))
+        print('-' * 50)
+
+        print_ast(macro)
 
 
 def do_lex(args):
@@ -1135,7 +1159,15 @@ def main():
     print_ast_parser = subparsers.add_parser('print_ast',
                                              parents=[parent_parser],
                                              help='build and print the AST')
+    print_ast_parser.add_argument("--strip-macros", action="store_true",
+                                  help="strip macros from the AST before "
+                                       "printing")
     print_ast_parser.set_defaults(func=do_print_ast)
+
+    print_macros_parser = subparsers.add_parser('print_macros',
+                                             parents=[parent_parser],
+                                             help='print all found macros')
+    print_macros_parser.set_defaults(func=do_print_macros)
 
     # Parse arguments.
     args = parser.parse_args()
