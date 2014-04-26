@@ -314,16 +314,6 @@ class OperatorNode(ASTNode):
         return self.__operator
 
 
-INVERSE_BLOCK_TOKEN = {
-    '(': ')',
-    ')': '(',
-    '[': ']',
-    ']': '[',
-    '{': '}',
-    '}': '{',
-}
-
-
 class BlockNode(ASTNode):
     """ A type of AST node that can contain children.
     """
@@ -563,139 +553,65 @@ def strip_macros(ast):
     return ast, sp.macro_blocks
 
 
-class MacroCase(object):
-    """ This class represents a single 'case' arm of a macro, and the
-        associated information - match template, replacement template, and
-        (optionally) any toplevel tokens to add.
+def is_macro_visible_from(macro_node, block):
+    """ Returns whether a macro node is visible from a given block, by walking
+        the parent chain of the block and checking if the block the macro is
+        defined in is in it.
+        TODO: return distance too?
     """
+    def_block = macro_node.parent
+    par = block
+    while par is not None:
+        if par is def_block:
+            return True
 
-    def __init__(self, match, template, toplevel=None):
-        self.match_nodes    = self.replace_macro_idents(match)
-        self.template_nodes = self.replace_macro_idents(template)
-        self.toplevel_nodes = self.replace_macro_idents(toplevel)
+        par = par.parent
 
-    def replace_macro_idents(self, ast):
-        """ Given an AST, will walk through it and replace all instances of
-            the macro identifier "$(blah)" with a MacroNode.  Will modify the
-            AST given in-place.
-        """
-
-        if ast is None:
-            return None
-
-        # We need to replace a sequence of nodes that are of the form
-        # '$ ( IDENTIFIER )'
-        i = 0
-        while True:
-            if i >= (len(ast.children) - 1):
-                break
-
-            op_node = ast.children[i]
-            block_node = ast.children[i + 1]
-
-            # To replace these two nodes, we need to:
-            #   - Have a leading $
-            #   - Next token must be a block of type '('
-            #   - The block must have one or more IDENTIFIER tokens as children
-            if (op_node.type == 'OPERATOR' and op_node.value == '$' and
-                isinstance(block_node, BlockNode) and
-                block_node.value == '(' and
-                len(block_node.children) > 0 and
-                all(x.type == 'IDENTIFIER' for x in block_node.children)):
-
-                # Matches!
-                specifiers = [x.value for x in block_node.children]
-                new_node = MacroNode(specifiers[0], specifiers[1:])
-
-                # Remove the two nodes from the AST, and replace them with this
-                # new node (in-place).
-                ast.children[i:i+2] = [new_node]
-
-            # Otherwise, if this is a block, we need to recurse into it.
-            elif isinstance(op_node, BlockNode):
-                self.replace_macro_idents(op_node)
-
-            i += 1
-
-        return ast
-
-    def _match(self, nodes, block, offset=0):
-        """ Helper function to determine if an AST matches a second, which may
-            contain macro nodes that need additional checking.  If so, returns
-            any template bindings.
-        """
-
-        template_bindings = {}
-
-        i = 0
-        while True:
-            if (i + offset) >= len(block):
-                return False, None
-
-            if i == len(nodes):
-                return True, template_bindings
-
-            match_node = nodes[i]
-            ast_node = block[i + offset]
-
-            # If this match node is a MacroNode, we need to check the given
-            # filters.
-            if isinstance(match_node, MacroNode):
-                matches = True
-
-                # TODO: check filters
-
-                # Bind the given name to this node.
-                template_bindings[match_node.name] = ast_node
-
-            else:
-                # Start by comparing type and value.
-                matches = (ast_node.type == match_node.type and
-                           ast_node.value == match_node.type)
-
-                # If this is a block node, it matches only if the block types
-                # are the same and they match recursively.
-                if (matches and isinstance(match_node, BlockNode) and
-                    isinstance(ast_node, BlockNode)):
-                    submatch, subbindings = self._match(match_node, ast_node)
-
-                    if submatch:
-                        template_bindings.update(subbindings)
-                    else:
-                        matches = False
-
-            if not matches:
-                return False, None
+    return False
 
 
-    def match(self, block, offset=0):
-        """ Check whether this case matches the given block at the given
-            offset, and, if it does, returns the new AST nodes that should be
-            inserted into the given location, the number of nodes that were
-            consumed, and (optionally) any top-level definitions.
-        """
-        matches, bindings = self._match(self.match_nodes, block, offset)
-        if not matches:
-            return False, None
+class CaseVisitor(NodeVisitor):
+    def __init__(self):
+        self.block_ty = None
+        self.blocks = {}
 
-        # Loop through the template recursively and replace nodes with the
-        # corresponding binding.
-        def walk_template(ast):
-            ret = []
-            for node in ast:
-                if isinstance(node, MacroNode):
-                    ret.append(bindings[node.name])
-                elif isinstance(node, BlockNode):
-                    new_block = node.clone(recursive=False)
-                    new_block.children.extend(walk_template(node.children))
-                else:
-                    ret.append(node)
-            return ret
+    def visit_IdentifierNode(self, node):
+        # If we've hit the identifier already, it means we have something like
+        # 'match' 'match', with no intervening block.
+        if self.block_ty is not None:
+            raise MacroError("Unexpected identifier '%s'" % (node.identifier,))
 
-        replacement_nodes = walk_template(self.template_nodes)
-        toplevel_nodes    = walk_template(self.toplevel_nodes)
+        # Check for valid identifier
+        if node.identifier not in ['match', 'template', 'toplevel']:
+            raise MacroError(
+                "Unknown identifier token in case arm: %s" % (
+                   node.identifier,))
 
-        return True, replacement_nodes, len(self.match_nodes), toplevel_nodes
+        # Save this type.
+        self.block_ty = node.identifier
+
+    def visit_BlockNode(self, node):
+        # If we get here, the block type should be set (indicating that we've
+        # seen a proper identifier before).
+        if self.block_ty is None:
+            raise MacroError("Unexpected block token")
+
+        # Great.  Save all this.
+        self.blocks[self.block_ty] = node
+
+        # Reset the block type so that we don't error out.
+        self.block_ty = None
+
+    def generic_visit(self, node):
+        # Something that's not a block or identifier node is an error.
+        if node.token is None:
+            ty = 'UNKNOWN'
+            val = 'UNKNOWN'
+        else:
+            ty = node.token.type
+            val = node.token.value
+
+        raise MacroError("Unknown %s token in case arm: %s" % (ty, val))
 
 
 def parse_case(block):
@@ -703,104 +619,80 @@ def parse_case(block):
         template and (optionally) toplevel blocks.
     """
 
-    match_block = None
-    template_block = None
-    toplevel_block = None
+    visitor = CaseVisitor()
+    visitor.visit(block)
 
-    for i in range(0, len(block.children), 2):
-        id_node = block.children[i]
-        block_node = block.children[i + 1]
-
-        if (id_node.type != 'IDENTIFIER' or
-            id_node.value not in ['match', 'template', 'toplevel']):
-            raise MacroError(
-                "Unknown %s token in case arm: %s" % (id_node.type,
-                                                      id_node.value)
-            )
-
-        if not (isinstance(block_node, BlockNode) and
-                block_node.value == '{'):
-            raise MacroError(
-                "Token following '%s' definition must be a curly brace "
-                "block, not a %s node: %s" % (id_node.value,
-                                              block_node.type,
-                                              block_node.value)
-            )
-
-        if 'match' == id_node.value:
-            match_block = block_node
-        elif 'template' == id_node.value:
-            template_block = block_node
-        elif 'template' == id_node.value:
-            toplevel_block = block_node
+    blocks = visitor.blocks
 
     # We must have a match and template blocks.
-    if match_block is None:
+    if 'match' not in blocks:
         raise MacroError("No 'match' block found in case arm")
-    if template_block is None:
+    if 'template' not in blocks:
         raise MacroError("No 'template' block found in case arm")
 
-    return match_block, template_block, toplevel_block
+    return blocks
 
 
-def parse_single_macro(name, block):
-    """ Parses a single macro block into a sequence of MacroCase objects
-    """
-    macro_def = []
+class MacroVisitor(NodeVisitor):
+    def __init__(self):
+        self.cases = []
+        self.root = True
+        self.found_case = False
 
-    # Each item in the block should be a 'case' identifier, followed by a
-    # curly brace block.
-    for i in range(0, len(block.children), 2):
-        case_node = block.children[i]
-        block_node = block.children[i + 1]
-        if case_node.type != 'IDENTIFIER' or case_node.value != 'case':
-            raise MacroError(
-                "Unknown %s token in macro definition: %s" % (
-                    case_node.type, case_node.value)
-            )
+    def visit_IdentifierNode(self, node):
+        if self.found_case:
+            raise MacroError("'case' found without intervening block")
 
-        if not (isinstance(block_node, BlockNode) and
-                block_node.value == '{'):
-            raise MacroError(
-                "Token following 'case' definition must be a curly brace "
-                "block, not a %s node: %s" % (block_node.type,
-                                              block_node.value)
-            )
+        if node.identifier != 'case':
+            raise MacroError("Unknown identifier token in macro definition: "
+                             "%s" % (node.identifier,))
 
-        # All good.  Parse this 'case' node.
-        case_def = parse_case(block_node)
-        macro_def.append(MacroCase(*case_def))
+        self.found_case = True
 
-    return macro_def
+    def visit_BlockNode(self, node):
+        if self.root:
+            self.root = False
+            return NodeVisitor.generic_visit(self, node)
+
+        if not self.found_case:
+            raise MacroError("block found without preceding 'case'")
+        if node.type != '{':
+            raise MacroError("Case blocks must be delimited with curly braces")
+
+        self.cases.append(node)
+        self.found_case = False
+
+
+def parse_single_macro(block):
+    visitor = MacroVisitor()
+    visitor.visit(block)
+
+    # TODO: need to modify the cases and turn '$' '(' <block> ')' into a
+    #       new macro node
+
+    return visitor.cases
 
 
 def parse_macros(macros):
-    """ Given a list of macros from strip_macros, above, will parse each of
-        them.
-        TODO: into what?
-    """
-
     ret = []
-    for name, macro_block, i in macros:
-        ret.append((name, parse_single_macro(name, macro_block)))
+    for name, macro_block in macros:
+        ret.append((name, parse_single_macro(macro_block)))
 
     return ret
 
 
 def process_macros(ast):
-    # Strip all macros out of the AST.
-    stripped_ast, macros = strip_macros(ast)
+    ast, macros = strip_macros(ast)
+    parsed = parse_macros(macros)
 
-    # Parse all the macros.
-    macros = parse_macros(macros)
-    for name, cases in macros:
-        print(("Macro '%s':\n" + '-' * 50) % (name,))
-        for i, case in enumerate(cases):
-            print("%d) %r" % (i + 1, case))
-            print_ast(case.template_nodes)
+    for name, cases in parsed:
+        print(name)
+        for case in cases:
+            print('-' * 50)
+            print_ast(case)
+        print('-' * 50)
 
-    # TODO: find macro calls and replace them
-
+    return ast
 
 
 def process_macros_old(ast):
@@ -1060,6 +952,37 @@ def process_macros_old(ast):
 ## PRETTY PRINTING
 
 
+INVERSE_BLOCK_TOKEN = {
+    '(': ')',
+    ')': '(',
+    '[': ']',
+    ']': '[',
+    '{': '}',
+    '}': '{',
+}
+
+
+class TokenGenerator(NodeVisitor):
+    def __init__(self):
+        self.tokens = []
+
+    def generic_visit(self, node):
+        if node.token is not None:
+            self.tokens.append(node.token)
+
+        NodeVisitor.generic_visit(self, node)
+
+        if node.token is not None and isinstance(node, BlockNode):
+            inverse = INVERSE_BLOCK_TOKEN[node.token.value]
+            self.tokens.append(Token('OPERATOR', inverse, -1, -1))
+
+
+def to_tokens(ast):
+    gen = TokenGenerator()
+    gen.visit(ast)
+    return gen.tokens
+
+
 def print_to_c(tokens):
     # Simple pretty-printing rules:
     #   - If it's an opening curly brace, print a newline and increment depth
@@ -1113,7 +1036,8 @@ def do_expand(args):
 
     process_macros(ast)
 
-    print_to_c(ast.to_tokens())
+    tokens = to_tokens(ast)
+    print_to_c(tokens)
 
 
 def do_print_ast(args):
