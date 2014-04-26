@@ -215,6 +215,42 @@ class ASTNode(metaclass=abc.ABCMeta):
     def parent(self):
         return self.__parent
 
+    @property
+    def next(self):
+        """ Returns the next (sibling) node in the AST.
+        """
+        if self.parent is None:
+            return None
+
+        children = self.parent.children
+        try:
+            idx = children.index(self)
+        except ValueError:
+            return None
+
+        if idx == len(children) - 1:
+            return None
+
+        return children[idx + 1]
+
+    @property
+    def previous(self):
+        """ Returns the previous (sibling) node in the AST.
+        """
+        if self.parent is None:
+            return None
+
+        children = self.parent.children
+        try:
+            idx = children.index(self)
+        except ValueError:
+            return None
+
+        if idx == 0:
+            return None
+
+        return children[idx - 1]
+
     def __repr__(self):
         return "%s(%s)" % (self.__class__.__name__, self.token)
 
@@ -463,55 +499,58 @@ class MacroStripper(NodeTransformer):
     def __init__(self):
         # Format [(name, block), ...]
         self.macro_blocks = []
+        self.strip = 0
+
+    def check_strip(self):
+        if self.strip > 0:
+            self.strip -= 1
+            return True
+
+        return False
+
+    def visit_IdentifierNode(self, node):
+        if self.check_strip():
+            return None
+
+        if node.identifier != 'macro':
+            return node
+
+        name_node = node.next
+        if name_node is None:
+            raise MacroError("No macro name found after 'macro' token")
+
+        if not isinstance(name_node, IdentifierNode):
+            err = ("Expected token after 'macro' to be an identifier, but "
+                   "found a '%s' token instead: %s")
+            raise MacroError(err % (name_node.token.type,
+                                    name_node.token.value))
+
+        bnode = name_node.next
+        if bnode is None:
+            raise MacroError("No block found after macro name")
+
+        if not (isinstance(bnode, BlockNode) and bnode.type == '{'):
+            err = ("Expected token after name to be a block, but found a '%s' "
+                   "token instead: %s")
+            raise MacroError(err % (bnode.token.type, bnode.token.value))
+
+        # Add this macro to the return array.
+        self.macro_blocks.append((name_node.identifier, bnode))
+
+        # Set the 'strip from AST' flag which indicates that we should remove
+        # the next two nodes from the AST.
+        self.strip = 2
 
     def visit_BlockNode(self, node):
-        i = 0
-        while True:
-            # Need to recalculate this on every loop, since it will change.
-            if i > (len(node.children) - 3):
-                break
+        if self.check_strip():
+            return None
 
-            ch = node.children[i]
-
-            # If this is a 'macro' identifier, we need to parse this macro.
-            if isinstance(ch, IdentifierNode) and ch.identifier == 'macro':
-                # The next token should be an identifier that's the name.
-                name_node = node.children[i + 1]
-                if not isinstance(name_node, IdentifierNode):
-                    err = ("Expected token after 'macro' to be an identifier, "
-                           "but found a '%s' token instead: %s")
-                    raise MacroError(err % (name_node.token.type,
-                                            name_node.token.value))
-
-                # The token after both should be a curly-braced block.
-                bnode = node.children[i + 2]
-                if not (isinstance(bnode, BlockNode) and bnode.type == '{'):
-                    err = ("Expected token after name to be a block, but "
-                           "found a '%s' token instead: %s")
-                    raise MacroError(err % (bnode.token.type,
-                                            bnode.token.value))
-
-                # If we get here, the macro is formed correctly.  We need to
-                # remove the three containing nodes from the AST.
-                node.children.pop(i + 2)
-                node.children.pop(i + 1)
-                node.children.pop(i)
-
-                # Add this macro to the return array.
-                self.macro_blocks.append((name_node.identifier, bnode))
-
-                # Back i up by 1, so that we re-process this position in the
-                # next loop (since the node was removed).
-                i -= 1
-
-            i += 1
-
-        # Now that we've stripped all macros, we need to recurse.
+        # If we're not removing this block, we recurse into it.
         return self.generic_visit(node)
 
     def visit_RootNode(self, node):
         # Root nodes are also blocks.
-        return self.visit_BlockNode(node)
+        return self.generic_visit(node)
 
 
 def strip_macros(ast):
