@@ -238,6 +238,10 @@ class ASTNode(object):
     def parent(self):
         return self.__parent
 
+    @parent.setter
+    def parent(self, parent):
+        self.__parent = parent
+
     @property
     def next(self):
         """ Returns the next (sibling) node in the AST.
@@ -787,7 +791,12 @@ class TemplateReplacer(NodeTransformer):
 class MacroApplier(NodeTransformer):
     def __init__(self, macros):
         self.macros = macros
+        self.toplevels = []
+        self.reset()
+
+    def reset(self):
         self.strip  = 0
+        self.changed = False
 
     def are_nodes_equal(self, node1, node2):
         if node1.__class__ != node2.__class__:
@@ -828,9 +837,9 @@ class MacroApplier(NodeTransformer):
                 continue
 
             # Compare the current block node and AST node.
-            # Note: deliberate fallthrough from above so that we catch cases
-            # where one node is a BlockNode and the other is also, but they
-            # are of different types.
+            # Note: we check this before comparing blocks so that we catch
+            # cases where both nodes are BlockNodes, but they are of different
+            # types.
             if not self.are_nodes_equal(match_node, ast_node):
                 return False, None
 
@@ -898,6 +907,9 @@ class MacroApplier(NodeTransformer):
         if not found:
             return node
 
+        # We've made changes.
+        self.changed = True
+
         # We need to replace the macro with the template and then strip the
         # next 'n' nodes from the AST.
         self.strip = len(block['match'].children)
@@ -909,9 +921,15 @@ class MacroApplier(NodeTransformer):
         replacer = TemplateReplacer(bindings)
         replacer.visit(template_clone)
 
-        # TODO: do the same with toplevel
+        # Set the 'parent' of each of the top-level template nodes to this
+        # node's parents.
+        for child in template_clone.children:
+            child.parent = node.parent
+
         if 'toplevel' in block:
             toplevel_clone = clone_ast(block['toplevel'])
+            replacer.visit(toplevel_clone)
+            self.toplevels.append(toplevel_clone.children)
 
         # Return all the new tokens to replace with.  Note that we return the
         # template's children, since we don't want to include the overall
@@ -926,11 +944,8 @@ class MacroApplier(NodeTransformer):
         return NodeTransformer.generic_visit(self, node)
 
 
-def process_macros(ast):
-    ast, macros = strip_macros(ast)
-    parsed = parse_macros(macros)
-
-    for name, all_blocks in parsed:
+def print_macros(macros):
+    for name, all_blocks in macros:
         print(name)
         print('=' * 50)
         for i, blocks in enumerate(all_blocks):
@@ -944,265 +959,29 @@ def process_macros(ast):
 
         print('-' * 50)
 
-    # Now, we walk the regular AST looking for cases where the templates above
-    # will match.
+
+def process_macros(ast):
+    ast, macros = strip_macros(ast)
+    parsed = parse_macros(macros)
+    #print_macros(parsed)
+
     app = MacroApplier(parsed)
-    app.visit(ast)
+
+    # Now, we walk the regular AST looking for cases where the templates above
+    # will match.  We do this until we haven't made any changes - i.e. all
+    # nested macros are applied - or until we hit a defined recursion limit of
+    # 100.
+    for i in range(100):
+        app.reset()
+        app.visit(ast)
+        if not app.changed:
+            break
+    else:
+        # In Python, 'else' statements on for loops execute if they terminated
+        # due to hitting the end of the iterator, instead of a 'break'.
+        raise MacroError("Hit recursion limit while expanding macros")
 
     return ast
-
-
-def process_macros_old(ast):
-    # In order to find macros, we need to look for an identifier 'macro',
-    # followed by an identifier, e.g. 'unless', followed by a {} block.  We
-    # walk the entire AST and, for each of them, process the macros for that
-    # block.
-    # Note that:
-    #   - Macros are block scoped, like variables - they can only be used in
-    #     the block they're defined in or any lower block.
-    #   - Macros are processes from inside out, until they no longer have any
-    #     macros.  This means that in the following:
-    #
-    #       macro foo {
-    #           case {
-    #               match { $(test) }
-    #               template { bar( $(test) ) }
-    #           }
-    #       }
-    #       macro bar {
-    #           case {
-    #               match { $(test) }
-    #               template { if( $(test) ) }
-    #           }
-    #       }
-    #       macro baz {
-    #           case {
-    #               match { $(test) }
-    #               template { $(test) }
-    #           }
-    #       }
-    #
-    #
-    #       baz {
-    #           foo(true) {
-    #               a = 1;
-    #           }
-    #       }
-    #
-    # The expansion will be as follows:
-    #
-    #       baz {
-    #           bar( (true) ) {
-    #               a = 1;
-    #           }
-    #       }
-    #
-    # And then:
-    #
-    #       baz {
-    #           if( ( (true) ) ) {
-    #               a = 1;
-    #           }
-    #       }
-    #
-    # And then:
-    #
-    #       {
-    #           if( ( (true) ) ) {
-    #               a = 1;
-    #           }
-    #       }
-    #
-    # As you can see, inner macros are recursively expanded until there are no
-    # more expansions to be performed, and then macros from higher levels are
-    # applied (and so on, up to the root of the file).
-    # Also note that macro DEFINITIONS aren't processed - we expand macros only
-    # at the site of usage - the definition is inserted as-is in to the AST,
-    # and then expanded until no child macros are found, and so on.
-
-    # This is a helper function to parse a single 'case' arm of a macro.
-    def parse_case(block):
-        # The valid components are:
-        #   match {}
-        #   template {}
-        #   toplevel {}
-        match_block = None
-        template_block = None
-        toplevel_block = None
-
-        for i in range(0, len(block.children), 2):
-            id_node = block.children[i]
-            block_node = block.children[i + 1]
-
-            if (id_node.type != 'IDENTIFIER' or
-                id_node.value not in ['match', 'template', 'toplevel']):
-                raise MacroError(
-                    "Unknown %s token in case arm: %s" % (id_node.type,
-                                                          id_node.value)
-                )
-
-            if not (isinstance(block_node, BlockNode) and
-                    block_node.value == '{'):
-                raise MacroError(
-                    "Token following '%s' definition must be a curly brace "
-                    "block, not a %s node: %s" % (id_node.value,
-                                                  block_node.type,
-                                                  block_node.value)
-                )
-
-            if 'match' == id_node.value:
-                match_block = block_node
-            elif 'template' == id_node.value:
-                template_block = block_node
-            elif 'template' == id_node.value:
-                toplevel_block = block_node
-
-        # We must have a match and template blocks.
-        if match_block is None:
-            raise MacroError("No 'match' block found in case arm")
-        if template_block is None:
-            raise MacroError("No 'template' block found in case arm")
-
-        return match_block, template_block, toplevel_block
-
-    # This is a helper function to parse a macro block.  It will return a set
-    # of tuples (name, (match, template, toplevel))
-    def parse_macro(name, block):
-        macro_def = []
-
-        # Each item in the block should be a 'case' identifier, followed by a
-        # curly brace block.
-        for i in range(0, len(block.children), 2):
-            case_node = block.children[i]
-            block_node = block.children[i + 1]
-            if case_node.type != 'IDENTIFIER' or case_node.value != 'case':
-                raise MacroError(
-                    "Unknown %s token in macro definition: %s" % (
-                        case_node.type, case_node.value)
-                )
-
-            if not (isinstance(block_node, BlockNode) and
-                    block_node.value == '{'):
-                raise MacroError(
-                    "Token following 'case' definition must be a curly brace "
-                    "block, not a %s node: %s" % (block_node.type,
-                                                  block_node.value)
-                )
-
-            # All good.  Parse this 'case' node.
-            case_def = parse_case(block_node)
-            macro_def.append((name, case_def))
-
-        return macro_def
-
-    # This is a helper function that, given a sequence of macro tuples in the
-    # form (match, template, toplevel), will return all those that match the
-    # given tokens.
-    def find_match(macros, block, offset):
-        for match, _, _ in macros:
-            for i in range(offset, len(block)):
-                pass
-
-        # TODO
-        return False
-
-    # This function will walk the AST and actually process macros.  The
-    # 'macros' parameter is a list of lists, where each top-level list is all
-    # the macros in a given block, and the contents are macro objects.
-    def walk_ast(ast, macros):
-        # The macros for this level.
-        curr_macros = []
-
-        # Helper function to look for macros in this scope, and then all higher
-        # scopes.
-        def find_macro(search):
-            found = []
-
-            for name, macro in curr_macros:
-                if name == search:
-                    found.append(macro)
-
-            # Need to start from the end, since inner macros can shadow outer
-            # ones.
-            for level in reversed(macros):
-                for name, macro in level:
-                    if name == search:
-                        found.append(macro)
-
-            return found
-
-
-        i = 0
-        while True:
-            if i == len(ast.children):
-                break
-
-            node = ast.children[i]
-
-            # If this is a 'macro' identifier, we need to parse this macro.
-            if 'IDENTIFIER' == node.type and 'macro' == node.value:
-                # The next token should be an identifier that's the name.
-                name_node = ast.children[i + 1]
-                if name_node.type != 'IDENTIFIER':
-                    raise MacroError(
-                        "Expected token after 'macro' to be an identifier, but"
-                        " found a '%s' token instead: %s" % (name_node.type,
-                                                             name_node.value)
-                    )
-
-                # The token after both should be a curly-braced block.
-                block_node = ast.children[i + 2]
-                if not (isinstance(block_node, BlockNode) and
-                        block_node.value == '{'):
-                    raise MacroError(
-                        "Expected token after macro name to be a block, but "
-                        "found a '%s' token instead: %s" % (block_node.type,
-                                                            block_node.value)
-                    )
-
-                # If we get here, the macro is formed correctly.  We need to
-                # remove it from the AST so it doesn't get pretty-printed.
-                ast.children.pop(i + 2)
-                ast.children.pop(i + 1)
-                ast.children.pop(i)
-
-                # Process this macro node.
-                macro_defs = parse_macro(name_node.value, block_node)
-                curr_macros.extend(macro_defs)
-
-                # Back i up by 1, so that we re-process this position in the
-                # next loop (since the node was removed).
-                i -= 1
-
-            # Otherwise, check if this is a call to a macro.
-            elif 'IDENTIFIER' == node.type:
-                possible_matches = find_macro(node.value)
-                if len(possible_matches):
-                    print("Found call to macro: %s" % (node.value,))
-
-                    # This is an invokation of a macro that has been defined,
-                    # and 'macros' now contains all possible matches for that
-                    # macro.  We need to find the appropriate match.
-                    macro = find_match(possible_matches, ast.children, i + 1)
-                    if macro is None:
-                        raise MacroError(
-                            "Did not find a matching case for the macro '%s' "
-                            "(out of %d possible cases)" % (
-                                node.value, len(possible_matches))
-                        )
-
-
-
-            # Otherwise, if this is a block, we need to recurse into it.
-            elif isinstance(node, BlockNode) and node.value == '{':
-                walk_ast(node, macros + [curr_macros])
-
-            # Otherwise, do nothing.
-            i += 1
-
-    walk_ast(ast, [])
-
-    return
 
 
 ###############################################################################
