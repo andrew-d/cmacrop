@@ -1035,12 +1035,14 @@ def print_to_c(tokens):
 
     block_depth = 0
     brace_depth = 0
+    output = []
+    add = output.append
 
     for i, tok in enumerate(tokens):
-        print(tok.value, end='')
+        add(tok.value)
         if ((i < len(tokens) - 1 and tokens[i + 1].value not in [',', ')']) and
             (tok.value != '(')):
-            print(' ', end='')
+            add(' ')
 
         if tok.value == '(':
             brace_depth += 1
@@ -1054,7 +1056,10 @@ def print_to_c(tokens):
                 block_depth -= 1
 
             if brace_depth == 0:
-                print('\n' + ('    ' * block_depth), end='')
+                add('\n' + ('    ' * block_depth))
+
+    final = ''.join(output)
+    print(final)
 
 
 ###############################################################################
