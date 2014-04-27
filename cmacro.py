@@ -578,6 +578,7 @@ def is_macro_visible_from(macro_node, block):
 
 class CaseVisitor(NodeVisitor):
     def __init__(self):
+        self.root = True
         self.block_ty = None
         self.blocks = {}
 
@@ -597,6 +598,11 @@ class CaseVisitor(NodeVisitor):
         self.block_ty = node.identifier
 
     def visit_BlockNode(self, node):
+        # The first block seen is the root node, and should be traversed.
+        if self.root is True:
+            self.root = False
+            return NodeVisitor.generic_visit(self, node)
+
         # If we get here, the block type should be set (indicating that we've
         # seen a proper identifier before).
         if self.block_ty is None:
@@ -669,14 +675,58 @@ class MacroVisitor(NodeVisitor):
         self.found_case = False
 
 
+class MacroNodeCreator(NodeTransformer):
+    def __init__(self):
+        self.strip = 0
+
+    def visit_OperatorNode(self, node):
+        if node.operator != '$':
+            return node
+
+        # The next token should be a bracket block token.
+        blk = node.next
+        if blk is None:
+            return node
+        if not (isinstance(blk, BlockNode) and blk.type == '('):
+            return node
+
+        # All things in the block should be identifiers.
+        if len(blk.children) < 1:
+            return node
+        if not all(isinstance(x, IdentifierNode) for x in blk.children):
+            return node
+
+        names = list(map(lambda n: n.identifier, blk.children))
+        self.strip = 1
+        return MacroNode(names[0], names[1:])
+
+    def visit_BlockNode(self, node):
+        if self.strip > 0:
+            self.strip -= 1
+            return None
+
+        return self.generic_visit(node)
+
+
 def parse_single_macro(block):
     visitor = MacroVisitor()
     visitor.visit(block)
+    cases = visitor.cases
 
-    # TODO: need to modify the cases and turn '$' '(' <block> ')' into a
-    #       new macro node
+    # For each case, parse out the set of 'match', 'template' and 'toplevel'
+    # blocks.
+    all_blocks = []
+    for case in visitor.cases:
+        all_blocks.append(parse_case(case))
 
-    return visitor.cases
+    # For each case, turn '$' '(' <block> ')' into a new macro node.
+    tform = MacroNodeCreator()
+    for blocks in all_blocks:
+        # TODO: should disallow filters on nodes in non-match arms
+        for ty, block in blocks.items():
+            tform.visit(case)
+
+    return all_blocks
 
 
 def parse_macros(macros):
@@ -687,16 +737,192 @@ def parse_macros(macros):
     return ret
 
 
+def clone_ast(ast):
+    if isinstance(ast, MacroNode):
+        return MacroNode(ast.name, ast.filters)
+
+    elif not isinstance(ast, BlockNode):
+        return ast.__class__(ast.token, ast.parent)
+
+    else:
+        # Is a BlockNode or subclass
+        new_node = ast.__class__(ast.token, ast.parent)
+        for child in ast.children:
+            new_node.children.append(clone_ast(child))
+        return new_node
+
+
+class TemplateReplacer(NodeTransformer):
+    def __init__(self, bindings):
+        self.bindings = bindings
+
+    def visit_MacroNode(self, node):
+        bound = self.bindings[node.name]
+        return bound
+
+
+class MacroApplier(NodeTransformer):
+    def __init__(self, macros):
+        self.macros = macros
+        self.strip  = 0
+
+    def are_nodes_equal(self, node1, node2):
+        if node1.__class__ != node2.__class__:
+            return False
+
+        if node1.token is not None:
+            if node2.token is None:
+                return False
+
+            return (node1.token.type == node2.token.type and
+                    node1.token.value == node2.token.value)
+
+        if node2.token is not None:
+            # Can short-circuit: know that node1.token is None
+            return False
+
+        # Both are None - how do we compare?
+        return True
+
+    def compare_matches(self, block, node, bindings=None):
+        # To determine if the given match does in fact match the given node, we
+        # compare each node with each other, including special logic for
+        # MacroNodes.
+
+        if bindings is None:
+            bindings = {}
+
+        ast_node = node
+        for match_node in block.children:
+            if ast_node is None:
+                return False, None
+
+            # If the block node is a macro node - i.e. one of the special $(x)
+            # variables - then it's always equal.
+            # TODO: filters
+            if isinstance(match_node, MacroNode):
+                bindings[match_node.name] = ast_node
+                continue
+
+            # Compare the current block node and AST node.
+            # Note: deliberate fallthrough from above so that we catch cases
+            # where one node is a BlockNode and the other is also, but they
+            # are of different types.
+            if not self.are_nodes_equal(match_node, ast_node):
+                return False, None
+
+            # If they're both blocks, need to recursively check that they
+            # match.
+            if (isinstance(match_node, BlockNode) and
+                isinstance(ast_node, BlockNode)):
+                if not self.compare_matches(match_node, ast_node, bindings):
+                    return False, None
+
+            ast_node = ast_node.next
+
+        return True, bindings
+
+    def visit_IdentifierNode(self, node):
+        found = False
+        bindings = {}
+        block = None
+
+        # Check if this is a macro identifier, and, if so, whether it's visible
+        # from this location.
+        for name, all_blocks in self.macros:
+            if node.identifier != name:
+                continue
+
+            # To determine visibility, we need the 'macro parent' node - i.e.
+            # the node in which the macro and macro's block are found.  Also,
+            # the contents of 'all_blocks' are each of the 'case' blocks that
+            # have been parsed, as follows:
+            #   macro foo {
+            #       case bar {
+            #           match { baz }
+            #       }
+            #   }
+            #
+            # Thus, since all_blocks contains the curly-braced block from each
+            # 'case' block, the match block's grandparent is the macro node.
+            macro_node = all_blocks[0]['match'].parent.parent
+
+            # Actually check visibility.
+            if not is_macro_visible_from(macro_node, node):
+                continue
+
+            # The invocation is correct.  See if one of the block's match
+            # templates matches.
+            for block in all_blocks:
+                match = block['match']
+
+                # NOTE: node.next since 'node' currently points to the macro
+                # invocation.
+                ok, bindings = self.compare_matches(block['match'], node.next)
+                if ok:
+                    found = True
+                    break
+
+            if found:
+                break
+
+        # If we didn't match, this isn't a 'real' invocation, and we do
+        # nothing.
+        if not found:
+            return node
+
+        print("Bindings: %r" % (bindings,))
+
+        # We need to replace the macro with the template and then strip the
+        # next 'n' nodes from the AST.
+        self.strip = len(block['match'].children)
+
+        # Clone the template AST.
+        template_clone = clone_ast(block['template'])
+
+        # Walk the template, filling in bindings.
+        replacer = TemplateReplacer(bindings)
+        replacer.visit(template_clone)
+
+        # TODO: do the same with toplevel
+        if 'toplevel' in block:
+            toplevel_clone = clone_ast(block['toplevel'])
+
+        # Return all the new tokens to replace with.  Note that we return the
+        # template's children, since we don't want to include the overall
+        # block.
+        return template_clone.children
+
+    def generic_visit(self, node):
+        if self.strip > 0:
+            self.strip -= 1
+            return None
+
+        return NodeTransformer.generic_visit(self, node)
+
+
 def process_macros(ast):
     ast, macros = strip_macros(ast)
     parsed = parse_macros(macros)
 
-    for name, cases in parsed:
+    for name, all_blocks in parsed:
         print(name)
-        for case in cases:
+        print('=' * 50)
+        for i, blocks in enumerate(all_blocks):
+            print('Block %d' % (i,))
             print('-' * 50)
-            print_ast(case)
+
+            for ty, block in blocks.items():
+                print(ty)
+                print_ast(block)
+                print('')
+
         print('-' * 50)
+
+    # Now, we walk the regular AST looking for cases where the templates above
+    # will match.
+    app = MacroApplier(parsed)
+    app.visit(ast)
 
     return ast
 
