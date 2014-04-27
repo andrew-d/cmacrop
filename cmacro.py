@@ -458,6 +458,12 @@ class ASTPrinter(NodeVisitor):
         self.seen = set()
         self.depth = 0
 
+    def visit_MacroNode(self, node):
+        if self.depth > 0:
+            print(('-' * self.depth) + '>', end='')
+
+        print('MACRO: %s (filters: %r)' % (node.name, node.filters))
+
     def generic_visit(self, node):
         if node.token is not None:
             if self.depth > 0:
