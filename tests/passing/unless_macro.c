@@ -13,4 +13,8 @@ int main(void) {
     unless(true) {
         printf("In 'unless'\n");
     }
+
+    unless(false) {
+        printf("Should never run!\n");
+    }
 }
