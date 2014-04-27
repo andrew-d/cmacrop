@@ -12,6 +12,28 @@ from collections import namedtuple
 
 
 ###############################################################################
+## UTILITY
+def add_metaclass(metaclass):
+    """ Class decorator for creating a class with a metaclass.
+
+        Taken with thanks from 'six':
+        https://bitbucket.org/gutworth/six/src/4420499da4959da591043652e50bf75f2d3398f7/six.py?at=default
+    """
+    def wrapper(cls):
+        orig_vars = cls.__dict__.copy()
+        orig_vars.pop('__dict__', None)
+        orig_vars.pop('__weakref__', None)
+        slots = orig_vars.get('__slots__')
+        if slots is not None:
+            if isinstance(slots, str):
+                slots = [slots]
+            for slots_var in slots:
+                orig_vars.pop(slots_var)
+        return metaclass(cls.__name__, cls.__bases__, orig_vars)
+    return wrapper
+
+
+###############################################################################
 ## LEXING
 
 # This is our token class - it represents a single token in the input
@@ -199,7 +221,8 @@ def build_c_lexer():
 ## ABSTRACT SYNTAX TREE
 
 
-class ASTNode(metaclass=abc.ABCMeta):
+@add_metaclass(abc.ABCMeta)
+class ASTNode(object):
     """ Root object for all AST nodes.
     """
 
