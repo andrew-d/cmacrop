@@ -823,6 +823,10 @@ class MacroApplier(NodeTransformer):
         return True, bindings
 
     def visit_IdentifierNode(self, node):
+        if self.strip > 0:
+            self.strip -= 1
+            return None
+
         found = False
         bindings = {}
         block = None
@@ -870,8 +874,6 @@ class MacroApplier(NodeTransformer):
         # nothing.
         if not found:
             return node
-
-        print("Bindings: %r" % (bindings,))
 
         # We need to replace the macro with the template and then strip the
         # next 'n' nodes from the AST.
