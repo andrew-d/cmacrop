@@ -5,6 +5,7 @@ from __future__ import print_function
 import re
 import abc
 import sys
+import logging
 import argparse
 from pprint import pprint
 from bisect import bisect_left
@@ -13,6 +14,12 @@ from collections import namedtuple
 
 ###############################################################################
 ## UTILITY
+
+# Configure logging
+log = logging.getLogger('cmacro')
+log.addHandler(logging.NullHandler())
+
+
 def add_metaclass(metaclass):
     """ Class decorator for creating a class with a metaclass.
 
@@ -253,6 +260,7 @@ class ASTNode(object):
         try:
             idx = children.index(self)
         except ValueError:
+            log.warn("Did not find self in parent.children: %r", self)
             return None
 
         if idx == len(children) - 1:
@@ -271,6 +279,7 @@ class ASTNode(object):
         try:
             idx = children.index(self)
         except ValueError:
+            log.warn("Did not find self in parent.children: %r", self)
             return None
 
         if idx == 0:
@@ -1166,6 +1175,10 @@ def main():
     # Global options.
     parent_parser = argparse.ArgumentParser(add_help=False)
     parent_parser.add_argument('file', type=str, help='file to process')
+    parent_parser.add_argument('--quiet', '-q', action='store_true',
+                               help='be more quiet')
+    parent_parser.add_argument('--verbose', '-v', action='store_true',
+                               help='be more verbose')
 
     lex_parser = subparsers.add_parser('lex', parents=[parent_parser],
                                        help='lex the input file, and print '
@@ -1192,6 +1205,21 @@ def main():
 
     # Parse arguments.
     args = parser.parse_args()
+
+    # Set up logger.
+    if args.quiet:
+        level = logging.WARN
+    elif args.verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+
+    logging.basicConfig(format='[%(levelname)1.1s %(asctime)s ' \
+                               '%(module)s:%(lineno)d] %(message)s',
+                        level=level)
+    log.debug("Starting application...")
+
+    # Call the app.
     args.func(args)
 
 
