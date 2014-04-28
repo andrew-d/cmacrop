@@ -94,5 +94,9 @@ class LexingTest(unittest.TestCase):
                 # TODO: how do we compare for errors?
 
 
+class ExpansionTest(unittest.TestCase):
+    pass
+
+
 if __name__ == "__main__":
     unittest.main()
