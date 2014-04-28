@@ -981,6 +981,11 @@ def process_macros(ast):
         # due to hitting the end of the iterator, instead of a 'break'.
         raise MacroError("Hit recursion limit while expanding macros")
 
+    # Place the toplevels.  Note that, since we're repeatedly prepending, we
+    # reverse the list before inserting so the order remains the same.
+    for toplevel in reversed(app.toplevels):
+        ast.children[0:0] = toplevel
+
     return ast
 
 
@@ -1039,8 +1044,15 @@ def print_to_c(tokens):
     add = output.append
 
     for i, tok in enumerate(tokens):
+        if i < len(tokens) - 1:
+            next_tok = tokens[i + 1]
+        else:
+            next_tok = None
+
         add(tok.value)
-        if ((i < len(tokens) - 1 and tokens[i + 1].value not in [',', ')']) and
+
+        if ((next_tok is not None and
+             next_tok.value not in [',', ')', ';']) and
             (tok.value != '(')):
             add(' ')
 
@@ -1049,16 +1061,21 @@ def print_to_c(tokens):
         elif tok.value == ')':
             brace_depth -= 1
 
+        if next_tok is not None and next_tok.value == '}':
+            block_depth -= 1
+
         if tok.value in ['{', '}', ';']:
             if tok.value == '{':
                 block_depth += 1
-            elif tok.value == '}':
-                block_depth -= 1
 
             if brace_depth == 0:
+                if (((next_tok is None) or
+                     (next_tok is not None and next_tok.value != '}')) and
+                    block_depth == 0):
+                    add('\n')
                 add('\n' + ('    ' * block_depth))
 
-    final = ''.join(output)
+    final = ''.join(output).strip()
     print(final)
 
 
