@@ -528,7 +528,11 @@ def print_ast(ast):
 
 # TODO: add line number and column number here
 class MacroError(Exception):
-    pass
+    def __init__(self, msg, line=-1, col=-1):
+        self.msg  = 0
+        self.line = line
+        self.col  = col
+        Exception.__init__(self, msg)
 
 
 class MacroStripper(NodeTransformer):
@@ -553,22 +557,28 @@ class MacroStripper(NodeTransformer):
 
         name_node = node.next
         if name_node is None:
-            raise MacroError("No macro name found after 'macro' token")
+            raise MacroError("No macro name found after 'macro' token",
+                             line=node.token.line, col=node.token.col)
 
         if not isinstance(name_node, IdentifierNode):
             err = ("Expected token after 'macro' to be an identifier, but "
                    "found a '%s' token instead: %s")
             raise MacroError(err % (name_node.token.type,
-                                    name_node.token.value))
+                                    name_node.token.value),
+                             line=name_node.token.line,
+                             col=name_node.token.col)
 
         bnode = name_node.next
         if bnode is None:
-            raise MacroError("No block found after macro name")
+            raise MacroError("No block found after macro name",
+                             line=name_node.token.line,
+                             col=name_node.token.col)
 
         if not (isinstance(bnode, BlockNode) and bnode.type == '{'):
             err = ("Expected token after name to be a block, but found a '%s' "
                    "token instead: %s")
-            raise MacroError(err % (bnode.token.type, bnode.token.value))
+            raise MacroError(err % (bnode.token.type, bnode.token.value),
+                             line=bnode.token.line, col=bnode.token.col)
 
         # Add this macro to the return array.
         self.macro_blocks.append((name_node.identifier, bnode))
@@ -626,13 +636,17 @@ class CaseVisitor(NodeVisitor):
         # If we've hit the identifier already, it means we have something like
         # 'match' 'match', with no intervening block.
         if self.block_ty is not None:
-            raise MacroError("Unexpected identifier '%s'" % (node.identifier,))
+            raise MacroError("Unexpected identifier '%s'" % (node.identifier,),
+                             line=node.token.line, col=node.token.col)
 
         # Check for valid identifier
         if node.identifier not in ['match', 'template', 'toplevel']:
             raise MacroError(
                 "Unknown identifier token in case arm: %s" % (
-                   node.identifier,))
+                   node.identifier,),
+                line=node.token.line,
+                col=node.token.col
+            )
 
         # Save this type.
         self.block_ty = node.identifier
@@ -646,7 +660,8 @@ class CaseVisitor(NodeVisitor):
         # If we get here, the block type should be set (indicating that we've
         # seen a proper identifier before).
         if self.block_ty is None:
-            raise MacroError("Unexpected block token")
+            raise MacroError("Unexpected block token",
+                             line=node.token.line, col=node.token.col)
 
         # Great.  Save all this.
         self.blocks[self.block_ty] = node
@@ -663,7 +678,8 @@ class CaseVisitor(NodeVisitor):
             ty = node.token.type
             val = node.token.value
 
-        raise MacroError("Unknown %s token in case arm: %s" % (ty, val))
+        raise MacroError("Unknown %s token in case arm: %s" % (ty, val),
+                         line=node.token.line, col=node.token.col)
 
 
 def parse_case(block):
@@ -678,9 +694,11 @@ def parse_case(block):
 
     # We must have a match and template blocks.
     if 'match' not in blocks:
-        raise MacroError("No 'match' block found in case arm")
+        raise MacroError("No 'match' block found in case arm",
+                         line=block.token.line, col=block.token.col)
     if 'template' not in blocks:
-        raise MacroError("No 'template' block found in case arm")
+        raise MacroError("No 'template' block found in case arm",
+                         line=block.token.line, col=block.token.col)
 
     return blocks
 
@@ -693,11 +711,13 @@ class MacroVisitor(NodeVisitor):
 
     def visit_IdentifierNode(self, node):
         if self.found_case:
-            raise MacroError("'case' found without intervening block")
+            raise MacroError("'case' found without intervening block",
+                             line=node.token.line, col=node.token.col)
 
         if node.identifier != 'case':
             raise MacroError("Unknown identifier token in macro definition: "
-                             "%s" % (node.identifier,))
+                             "%s" % (node.identifier,),
+                             line=node.token.line, col=node.token.col)
 
         self.found_case = True
 
@@ -707,9 +727,11 @@ class MacroVisitor(NodeVisitor):
             return NodeVisitor.generic_visit(self, node)
 
         if not self.found_case:
-            raise MacroError("block found without preceding 'case'")
+            raise MacroError("block found without preceding 'case'",
+                             line=node.token.line, col=node.token.col)
         if node.type != '{':
-            raise MacroError("Case blocks must be delimited with curly braces")
+            raise MacroError("Case blocks must be delimited with curly braces",
+                             line=node.token.line, col=node.token.col)
 
         self.cases.append(node)
         self.found_case = False
@@ -759,7 +781,8 @@ class MacroNodeCreator(NodeTransformer):
 
         for flt in names[1:]:
             if flt not in VALID_FILTERS:
-                raise MacroError("Invalid filter found: %s" % (flt,))
+                raise MacroError("Invalid filter found: %s" % (flt,),
+                                 line=blk.token.line, col=blk.token.col)
 
         # Success - strip the following block, and return a new MacroNode.
         self.strip = 1
