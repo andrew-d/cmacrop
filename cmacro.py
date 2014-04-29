@@ -306,7 +306,11 @@ class ConstantNode(ASTNode):
     pass
 
 
-class IntConstantNode(ConstantNode):
+class NumConstantNode(ConstantNode):
+    pass
+
+
+class IntConstantNode(NumConstantNode):
     def __init__(self, token, parent=None):
         ASTNode.__init__(self, token, parent)
 
@@ -317,7 +321,7 @@ class IntConstantNode(ConstantNode):
         return self.__value
 
 
-class FloatConstantNode(ConstantNode):
+class FloatConstantNode(NumConstantNode):
     def __init__(self, token, parent=None):
         ASTNode.__init__(self, token, parent)
 
@@ -328,7 +332,7 @@ class FloatConstantNode(ConstantNode):
         return self.__value
 
 
-class StringNode(ASTNode):
+class StringNode(ConstantNode):
     def __init__(self, token, parent=None):
         ASTNode.__init__(self, token, parent)
 
@@ -711,7 +715,7 @@ class MacroVisitor(NodeVisitor):
         self.found_case = False
 
 
-VALID_FILTERS = [
+VALID_FILTERS = set([
     'ident',
     'int',
     'float',
@@ -722,7 +726,7 @@ VALID_FILTERS = [
     'list',
     'array',
     'block',
-]
+])
 
 
 class MacroNodeCreator(NodeTransformer):
@@ -828,6 +832,11 @@ class MacroApplier(NodeTransformer):
         self.toplevels = []
         self.reset()
 
+        # Sanity checking for FILTER_CLASSES
+        for x in self.FILTER_CLASSES.keys():
+            if not x in VALID_FILTERS:
+                raise RuntimeError("%s not in VALID_FILTERS" % (x,))
+
     def reset(self):
         self.strip  = 0
         self.changed = False
@@ -850,6 +859,43 @@ class MacroApplier(NodeTransformer):
         # Both are None - how do we compare?
         return True
 
+    FILTER_CLASSES = {
+        'ident':    IdentifierNode,
+        'int':      IntConstantNode,
+        'float':    FloatConstantNode,
+        'num':      NumConstantNode,
+        'string':   StringNode,
+        'const':    ConstantNode,
+        'op':       OperatorNode,
+        'list':     BlockNode,
+        'array':    BlockNode,
+        'block':    BlockNode,
+    }
+
+    def macro_node_matches(self, macro_node, ast_node):
+        # No filters == immediate match
+        if len(macro_node.filters) == 0:
+            return True
+
+        # We check each of the filters on the macro to see if they match.
+        for flt in macro_node.filters:
+            klass = self.FILTER_CLASSES[flt]
+            if not isinstance(ast_node, klass):
+                continue
+
+            # If the class is a block, need to check the type too.
+            if ty == 'list' and ast_node.type != '(':
+                continue
+            if ty == 'array' and ast_node.type != '[':
+                continue
+            if ty == 'block' and ast_node.type != '{':
+                continue
+
+            return True
+
+        # Had some filters, but didn't match.
+        return False
+
     def compare_matches(self, block, node, bindings=None):
         # To determine if the given match does in fact match the given node, we
         # compare each node with each other, including special logic for
@@ -865,10 +911,12 @@ class MacroApplier(NodeTransformer):
 
             # If the block node is a macro node - i.e. one of the special $(x)
             # variables - then it's always equal.
-            # TODO: filters
             if isinstance(match_node, MacroNode):
-                bindings[match_node.name] = ast_node
-                continue
+                if self.macro_node_matches(match_node, ast_node):
+                    bindings[match_node.name] = ast_node
+                    continue
+                else:
+                    return False, None
 
             # Compare the current block node and AST node.
             # Note: we check this before comparing blocks so that we catch
