@@ -711,9 +711,24 @@ class MacroVisitor(NodeVisitor):
         self.found_case = False
 
 
+VALID_FILTERS = [
+    'ident',
+    'int',
+    'float',
+    'num',
+    'string',
+    'const',
+    'op',
+    'list',
+    'array',
+    'block',
+]
+
+
 class MacroNodeCreator(NodeTransformer):
     def __init__(self):
         self.strip = 0
+        self.filters_allowed = False
 
     def visit_OperatorNode(self, node):
         if node.operator != '$':
@@ -733,6 +748,16 @@ class MacroNodeCreator(NodeTransformer):
             return node
 
         names = list(map(lambda n: n.identifier, blk.children))
+
+        # Check for invalid filters.
+        if len(names) > 1 and not self.filters_allowed:
+            raise MacroError("Filters only allowed when defining variables")
+
+        for flt in names[1:]:
+            if flt not in VALID_FILTERS:
+                raise MacroError("Invalid filter found: %s" % (flt,))
+
+        # Success - strip the following block, and return a new MacroNode.
         self.strip = 1
         return MacroNode(names[0], names[1:])
 
@@ -758,9 +783,9 @@ def parse_single_macro(block):
     # For each case, turn '$' '(' <block> ')' into a new macro node.
     tform = MacroNodeCreator()
     for blocks in all_blocks:
-        # TODO: should disallow filters on nodes in non-match arms
         for ty, block in blocks.items():
-            tform.visit(case)
+            tform.filters_allowed = (ty == 'match')
+            tform.visit(block)
 
     return all_blocks
 
