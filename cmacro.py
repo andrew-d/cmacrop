@@ -1028,24 +1028,22 @@ class MacroApplier(NodeTransformer):
 
 def print_macros(macros):
     for name, all_blocks in macros:
+        print('=' * 50)
         print(name)
         print('=' * 50)
         for i, blocks in enumerate(all_blocks):
-            print('Block %d' % (i,))
-            print('-' * 50)
+            print('Case %d' % (i + 1,))
+            print('-' * 30)
 
             for ty, block in blocks.items():
                 print(ty)
                 print_ast(block)
                 print('')
 
-        print('-' * 50)
-
 
 def process_macros(ast):
     ast, macros = strip_macros(ast)
     parsed = parse_macros(macros)
-    #print_macros(parsed)
 
     app = MacroApplier(parsed)
 
@@ -1205,13 +1203,8 @@ def do_print_macros(args):
     ast = make_ast(tokens)
     ast, macros = strip_macros(ast)
 
-    # TODO: parse the macros before printing them
-
-    for name, macro in macros:
-        print("Macro '%s'" % (name,))
-        print('-' * 50)
-
-        print_ast(macro)
+    parsed = parse_macros(macros)
+    print_macros(parsed)
 
 
 def do_lex(args):
