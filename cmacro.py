@@ -1172,7 +1172,10 @@ def do_expand(args):
 
     ast = make_ast(tokens)
 
-    process_macros(ast)
+    try:
+        process_macros(ast)
+    except MacroError as e:
+        print("Error processing macros: %s" % (e,))
 
     tokens = to_tokens(ast)
     print_to_c(tokens)
