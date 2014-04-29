@@ -5,12 +5,38 @@ from __future__ import print_function
 import os
 import sys
 import unittest
+from functools import wraps
 
 sys.path.insert(0, '.')
 import cmacro
 
 
-class LexingTest(unittest.TestCase):
+# Get around lack of locality.
+ASSERT_COUNTER = [0]
+
+
+def counting_wrapper(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        ASSERT_COUNTER[0] += 1
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+class BaseTestCase(unittest.TestCase):
+    def __getattribute__(self, attr_name):
+        obj = super(BaseTestCase, self).__getattribute__(attr_name)
+
+        # Only count 'assert' functions that come from the base class.
+        if (hasattr(obj, "__call__") and attr_name.startswith('assert') and
+            hasattr(unittest.TestCase, attr_name)):
+            return counting_wrapper(obj)
+        else:
+            return obj
+
+
+class LexingTest(BaseTestCase):
     def load_passing_testcases(self):
         pth = os.path.join(
             os.path.abspath(os.path.dirname(__file__)),
@@ -94,9 +120,12 @@ class LexingTest(unittest.TestCase):
                 # TODO: how do we compare for errors?
 
 
-class ExpansionTest(unittest.TestCase):
+class ExpansionTest(BaseTestCase):
     pass
 
 
 if __name__ == "__main__":
-    unittest.main()
+    try:
+        unittest.main()
+    finally:
+        print("ASSERTS: %d" % (ASSERT_COUNTER[0],), file=sys.stderr)
