@@ -1108,17 +1108,17 @@ def to_tokens(ast):
 
 def print_to_c(tokens):
     # Simple pretty-printing rules:
-    #   - If it's an opening curly brace, print a newline and increment depth
-    #   - If is's a closing curly brace, print a newline and decrement depth
-    #   - If it's a semicolon, print a newline unless we're in brackets.
-    #   - Don't print a space if:
-    #       - The next item is a comma or closing brace.
-    #       - The curren item is an opening brace.
-    #
-    # TODO: Rework printing cycle so we don't have closing curly braces
-    #       indented to the level of the inner block.
-    # TODO: Have a feature for adding #line directives, or similar, so we can
-    #       link back to the original source file.
+    #   - Print the token
+    #   - If the next token is not one of: ,);
+    #     And if the current token is not: (
+    #     Then print a space.
+    #   - Increment brace / block depth
+    #   - If we're at the root level and the next token is not a '}', then
+    #     print a newline (to seperate top-level items).
+    #   - If the current token is one of: ;{}
+    #     And if we're not in brackets, then print a newline and the indent
+    #     to reach the proper indentation level.
+    #   - Finally, after doing this for all tokens, strip trailing whitespace.
 
     block_depth = 0
     brace_depth = 0
