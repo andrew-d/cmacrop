@@ -1,0 +1,6 @@
+language: python
+
+# Use 3.4 for testing due to use of unittest.subTest
+python:
+  - "3.4"
+script: "./test_cmacro.py"
