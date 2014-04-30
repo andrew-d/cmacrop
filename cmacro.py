@@ -514,36 +514,40 @@ def make_ast(tokens):
 
 
 class ASTPrinter(NodeVisitor):
-    def __init__(self):
+    def __init__(self, out):
+        self.out = out
         self.seen = set()
         self.depth = 0
 
     def print_depth(self):
         if self.depth > 0:
-            print(('-' * self.depth) + '>', end='')
+            print(('-' * self.depth) + '>', end='', file=self.out)
 
     def visit_MacroBindingNode(self, node):
         self.print_depth()
-        print('MACRO BINDING: %s (filters: %r)' % (node.name, node.filters))
+        print('MACRO BINDING: %s (filters: %r)' % (node.name, node.filters),
+              file=self.out)
 
     def visit_MacroCommandNode(self, node):
         self.print_depth()
-        print('MACRO COMMAND: %s (args: %r)' % (node.command, node.args))
+        print('MACRO COMMAND: %s (args: %r)' % (node.command, node.args),
+              file=self.out)
 
     def generic_visit(self, node):
         if node.token is not None:
             self.print_depth()
-            print('%s: %s' % (node.token.type, node.token.value))
+            print('%s: %s' % (node.token.type, node.token.value),
+                  file=self.out)
 
         self.depth += 1
         NodeVisitor.generic_visit(self, node)
         self.depth -= 1
 
 
-def print_ast(ast):
+def print_ast(ast, out=sys.stdout):
     """ Print an AST as a formatted tree.
     """
-    ASTPrinter().visit(ast)
+    ASTPrinter(out).visit(ast)
 
 
 ###############################################################################
@@ -1139,19 +1143,19 @@ class MacroApplier(NodeTransformer):
         return NodeTransformer.generic_visit(self, node)
 
 
-def print_macros(macros):
+def print_macros(macros, out=sys.stdout):
     for name, all_blocks in macros:
-        print('=' * 50)
-        print(name)
-        print('=' * 50)
+        print('=' * 50, file=out)
+        print(name, file=out)
+        print('=' * 50, file=out)
         for i, blocks in enumerate(all_blocks):
-            print('Case %d' % (i + 1,))
-            print('-' * 30)
+            print('Case %d' % (i + 1,), file=out)
+            print('-' * 30, file=out)
 
             for ty, block in blocks.items():
-                print(ty)
-                print_ast(block)
-                print('')
+                print(ty, file=out)
+                print_ast(block, file=out)
+                print('', file=out)
 
 
 def process_macros(ast):
@@ -1217,7 +1221,7 @@ def to_tokens(ast):
     return gen.tokens
 
 
-def print_to_c(tokens):
+def print_to_c(tokens, out=sys.stdout):
     # Simple pretty-printing rules:
     #   - Print the token
     #   - If the next token is not one of: ,);
@@ -1269,7 +1273,7 @@ def print_to_c(tokens):
                 add('\n' + ('    ' * block_depth))
 
     final = ''.join(output).strip()
-    print(final)
+    print(final, file=out)
 
 
 ###############################################################################
@@ -1278,6 +1282,7 @@ def print_to_c(tokens):
 
 def do_expand(args):
     fname, contents = get_file(args)
+    output = get_output(args)
 
     lexer = build_c_lexer()
     lexer.input(contents)
@@ -1291,11 +1296,12 @@ def do_expand(args):
         print("Error processing macros: %s" % (e,))
 
     tokens = to_tokens(ast)
-    print_to_c(tokens)
+    print_to_c(tokens, output)
 
 
 def do_print_ast(args):
     fname, contents = get_file(args)
+    output = get_output(args)
 
     lexer = build_c_lexer()
     lexer.input(contents)
@@ -1306,11 +1312,12 @@ def do_print_ast(args):
     if args.strip_macros:
         strip_macros(ast)
 
-    print_ast(ast)
+    print_ast(ast, output)
 
 
 def do_print_macros(args):
     fname, contents = get_file(args)
+    output = get_output(args)
 
     lexer = build_c_lexer()
     lexer.input(contents)
@@ -1320,11 +1327,12 @@ def do_print_macros(args):
     ast, macros = strip_macros(ast)
 
     parsed = parse_macros(macros)
-    print_macros(parsed)
+    print_macros(parsed, output)
 
 
 def do_lex(args):
     fname, contents = get_file(args)
+    output = get_output(args)
 
     lexer = build_c_lexer()
     lexer.input(contents)
@@ -1334,7 +1342,7 @@ def do_lex(args):
             t.line,
             t.col,
             t.value,
-        ))
+        ), file=output)
 
 
 def get_file(args):
@@ -1350,6 +1358,17 @@ def get_file(args):
     return fname, text
 
 
+def get_output(args):
+    fname = args.output
+
+    if '-' == fname:
+        f = sys.stdout
+    else:
+        f = open(fname, 'w')
+
+    return f
+
+
 def main():
     parser = argparse.ArgumentParser(description='Macro processor for C')
     subparsers = parser.add_subparsers()
@@ -1361,34 +1380,38 @@ def main():
                                help='be more quiet')
     parent_parser.add_argument('--verbose', '-v', action='store_true',
                                help='be more verbose')
+    parent_parser.add_argument('--output', '-o', default='-',
+                               help='where to write output to')
     # TODO: add preprocessing step, argument to control preprocessor, and
     #       argument(s?) to pass flags to preprocessor
-    # TODO: add -o / --output flag to determine where to write to
 
     # --------------------------------------------------
-    expand_parser = subparsers.add_parser('expand', parents=[parent_parser],
-                                          help='expand macros in the input')
+    expand_parser = subparsers.add_parser(
+        'expand',
+        parents=[parent_parser], help='expand macros in the input')
     expand_parser.set_defaults(func=do_expand)
 
     # --------------------------------------------------
-    lex_parser = subparsers.add_parser('lex', parents=[parent_parser],
-                                       help='lex the input file, and print '
-                                            'tokens to stdout')
+    lex_parser = subparsers.add_parser(
+        'lex',
+        parents=[parent_parser],
+        help='lex the input file, and print tokens to stdout')
     lex_parser.set_defaults(func=do_lex)
 
     # --------------------------------------------------
-    print_ast_parser = subparsers.add_parser('print_ast',
-                                             parents=[parent_parser],
-                                             help='build and print the AST')
-    print_ast_parser.add_argument("--strip-macros", action="store_true",
-                                  help="strip macros from the AST before "
-                                       "printing")
+    print_ast_parser = subparsers.add_parser(
+        'print_ast',
+        parents=[parent_parser],
+        help='build and print the AST')
+    print_ast_parser.add_argument(
+        "--strip-macros",
+        action="store_true", help="strip macros from the AST before printing")
     print_ast_parser.set_defaults(func=do_print_ast)
 
     # --------------------------------------------------
-    print_macros_parser = subparsers.add_parser('print_macros',
-                                             parents=[parent_parser],
-                                             help='print all found macros')
+    print_macros_parser = subparsers.add_parser(
+        'print_macros',
+        parents=[parent_parser], help='print all found macros')
     print_macros_parser.set_defaults(func=do_print_macros)
 
     # Parse arguments.
