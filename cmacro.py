@@ -1365,16 +1365,18 @@ def main():
     #       argument(s?) to pass flags to preprocessor
     # TODO: add -o / --output flag to determine where to write to
 
+    # --------------------------------------------------
+    expand_parser = subparsers.add_parser('expand', parents=[parent_parser],
+                                          help='expand macros in the input')
+    expand_parser.set_defaults(func=do_expand)
+
+    # --------------------------------------------------
     lex_parser = subparsers.add_parser('lex', parents=[parent_parser],
                                        help='lex the input file, and print '
                                             'tokens to stdout')
     lex_parser.set_defaults(func=do_lex)
 
-
-    expand_parser = subparsers.add_parser('expand', parents=[parent_parser],
-                                          help='expand macros in the input')
-    expand_parser.set_defaults(func=do_expand)
-
+    # --------------------------------------------------
     print_ast_parser = subparsers.add_parser('print_ast',
                                              parents=[parent_parser],
                                              help='build and print the AST')
@@ -1383,6 +1385,7 @@ def main():
                                        "printing")
     print_ast_parser.set_defaults(func=do_print_ast)
 
+    # --------------------------------------------------
     print_macros_parser = subparsers.add_parser('print_macros',
                                              parents=[parent_parser],
                                              help='print all found macros')
@@ -1390,6 +1393,9 @@ def main():
 
     # Parse arguments.
     args = parser.parse_args()
+    if not 'func' in args:
+        parser.print_help()
+        return
 
     # Set up logger.
     if args.quiet:
