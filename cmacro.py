@@ -388,8 +388,8 @@ class RootNode(BlockNode):
 class MacroBindingNode(ASTNode):
     """ Special sentinel node for macro bindings in the form $(name [filters]).
     """
-    def __init__(self, name, filters):
-        ASTNode.__init__(self, token=None, parent=None)
+    def __init__(self, name, filters, parent=None):
+        ASTNode.__init__(self, token=None, parent=parent)
 
         # The specifier is a single word, followed by some number of other
         # words that act as filters.
@@ -409,8 +409,8 @@ class MacroCommandNode(ASTNode):
     """ Special sentinel node for macro functions in the form
         $(@command [args]).
     """
-    def __init__(self, command, args):
-        ASTNode.__init__(self, token=None, parent=None)
+    def __init__(self, command, args, parent=None):
+        ASTNode.__init__(self, token=None, parent=parent)
 
         self.__command = command
         self.__args = args
@@ -824,7 +824,7 @@ class MacroNodeCreator(NodeTransformer):
             args    = blk.children[2:]
 
             log.debug("Creating command node: $(@%s, ...)", command)
-            replacement_node = MacroCommandNode(command, args)
+            replacement_node = MacroCommandNode(command, args, node.parent)
 
         else:
             log.debug("Found initial macro binding at line %d, col %d",
@@ -850,7 +850,8 @@ class MacroNodeCreator(NodeTransformer):
                                      line=blk.token.line, col=blk.token.col)
 
             log.debug("Creating binding node: $(%s, ...)", names[0])
-            replacement_node = MacroBindingNode(names[0], names[1:])
+            replacement_node = MacroBindingNode(names[0], names[1:],
+                                                node.parent)
 
         # Success - strip the following block, and return the new node.
         self.strip = 1
@@ -900,10 +901,10 @@ def parse_macros(macros):
 
 def clone_ast(ast):
     if isinstance(ast, MacroBindingNode):
-        return MacroBindingNode(ast.name, ast.filters[:])
+        return MacroBindingNode(ast.name, ast.filters[:], ast.parent)
 
     elif isinstance(ast, MacroCommandNode):
-        return MacroCommandNode(ast.command, ast.args[:])
+        return MacroCommandNode(ast.command, ast.args[:], ast.parent)
 
     elif not isinstance(ast, BlockNode):
         return ast.__class__(ast.token, ast.parent)
