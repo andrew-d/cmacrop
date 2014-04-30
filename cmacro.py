@@ -385,8 +385,8 @@ class RootNode(BlockNode):
         return None
 
 
-class MacroNode(ASTNode):
-    """ Special sentinel node for macros.
+class MacroBindingNode(ASTNode):
+    """ Special sentinel node for macro bindings in the form $(name [filters]).
     """
     def __init__(self, name, filters):
         ASTNode.__init__(self, token=None, parent=None)
@@ -403,6 +403,25 @@ class MacroNode(ASTNode):
     @property
     def filters(self):
         return self.__filters
+
+
+class MacroCommandNode(ASTNode):
+    """ Special sentinel node for macro functions in the form
+        $(@command [args]).
+    """
+    def __init__(self, command, args):
+        ASTNode.__init__(self, token=None, parent=None)
+
+        self.__command = command
+        self.__args = args
+
+    @property
+    def command(self):
+        return self.__command
+
+    @property
+    def args(self):
+        return self.__args
 
 
 class NodeVisitor(object):
@@ -499,17 +518,21 @@ class ASTPrinter(NodeVisitor):
         self.seen = set()
         self.depth = 0
 
-    def visit_MacroNode(self, node):
+    def print_depth(self):
         if self.depth > 0:
             print(('-' * self.depth) + '>', end='')
 
-        print('MACRO: %s (filters: %r)' % (node.name, node.filters))
+    def visit_MacroBindingNode(self, node):
+        self.print_depth()
+        print('MACRO BINDING: %s (filters: %r)' % (node.name, node.filters))
+
+    def visit_MacroCommandNode(self, node):
+        self.print_depth()
+        print('MACRO COMMAND: %s (args: %r)' % (node.command, node.args))
 
     def generic_visit(self, node):
         if node.token is not None:
-            if self.depth > 0:
-                print(('-' * self.depth) + '>', end='')
-
+            self.print_depth()
             print('%s: %s' % (node.token.type, node.token.value))
 
         self.depth += 1
@@ -760,6 +783,7 @@ class MacroNodeCreator(NodeTransformer):
     def __init__(self):
         self.strip = 0
         self.filters_allowed = False
+        self.commands_allowed = False
 
     def visit_OperatorNode(self, node):
         if node.operator != '$':
@@ -780,38 +804,57 @@ class MacroNodeCreator(NodeTransformer):
             return node
 
         # If the first thing in the block is a '@' operator, then this is a
-        # command.  Otherwise, everything should be an identifier.
+        # command.  Otherwise, it's a binding.
         if (isinstance(blk.children[0], OperatorNode) and
             blk.children[0].operator == '@'):
+            log.debug("Found initial macro command at line %d, col %d",
+                      node.token.line, node.token.col)
+
+            if not self.commands_allowed:
+                raise MacroError("Commands aren't allowed in 'match' blocks")
+
             if len(blk.children) < 2:
                 log.debug("Didn't find a command name after '@'")
                 return node
+            if not isinstance(blk.children[1], IdentifierNode):
+                log.debug("Node after '@' isn't an identifier")
+                return node
 
-            # TODO: actually support commands - break into MacroBindingNode and
-            #       MacroCommandNode?  If we do this, disallow command in the
-            #       match arm, only in 'template' and 'toplevel'.
-            return node
+            command = blk.children[1].identifier
+            args    = blk.children[2:]
 
-        elif not all(isinstance(x, IdentifierNode) for x in blk.children):
-            log.debug("Non-identifier found in () block: %r",
-                      [x for x in blk.children
-                       if not isinstance(x, IdentifierNode)])
-            return node
+            log.debug("Creating command node: $(@%s, ...)", command)
+            replacement_node = MacroCommandNode(command, args)
 
-        names = list(map(lambda n: n.identifier, blk.children))
+        else:
+            log.debug("Found initial macro binding at line %d, col %d",
+                      node.token.line, node.token.col)
 
-        # Check for invalid filters.
-        if len(names) > 1 and not self.filters_allowed:
-            raise MacroError("Filters only allowed when defining variables")
+            # For bindings, everything should be an identifier.
+            if not all(isinstance(x, IdentifierNode) for x in blk.children):
+                log.debug("Non-identifier found in () block: %r",
+                          [x for x in blk.children
+                           if not isinstance(x, IdentifierNode)])
+                return node
 
-        for flt in names[1:]:
-            if flt not in VALID_FILTERS:
-                raise MacroError("Invalid filter found: %s" % (flt,),
-                                 line=blk.token.line, col=blk.token.col)
+            names = list(map(lambda n: n.identifier, blk.children))
 
-        # Success - strip the following block, and return a new MacroNode.
+            # Check for invalid filters.
+            if len(names) > 1 and not self.filters_allowed:
+                raise MacroError("Filters only allowed when defining "
+                                 "variables")
+
+            for flt in names[1:]:
+                if flt not in VALID_FILTERS:
+                    raise MacroError("Invalid filter found: %s" % (flt,),
+                                     line=blk.token.line, col=blk.token.col)
+
+            log.debug("Creating binding node: $(%s, ...)", names[0])
+            replacement_node = MacroBindingNode(names[0], names[1:])
+
+        # Success - strip the following block, and return the new node.
         self.strip = 1
-        return MacroNode(names[0], names[1:])
+        return replacement_node
 
     def visit_BlockNode(self, node):
         if self.strip > 0:
@@ -836,7 +879,9 @@ def parse_single_macro(block):
     tform = MacroNodeCreator()
     for blocks in all_blocks:
         for ty, block in blocks.items():
-            tform.filters_allowed = (ty == 'match')
+            is_match = (ty == 'match')
+            tform.filters_allowed = is_match
+            tform.commands_allowed = not is_match
             tform.visit(block)
 
     return all_blocks
@@ -854,8 +899,11 @@ def parse_macros(macros):
 
 
 def clone_ast(ast):
-    if isinstance(ast, MacroNode):
-        return MacroNode(ast.name, ast.filters)
+    if isinstance(ast, MacroBindingNode):
+        return MacroBindingNode(ast.name, ast.filters[:])
+
+    elif isinstance(ast, MacroCommandNode):
+        return MacroCommandNode(ast.command, ast.args[:])
 
     elif not isinstance(ast, BlockNode):
         return ast.__class__(ast.token, ast.parent)
@@ -872,9 +920,13 @@ class TemplateReplacer(NodeTransformer):
     def __init__(self, bindings):
         self.bindings = bindings
 
-    def visit_MacroNode(self, node):
+    def visit_MacroBindingNode(self, node):
         bound = self.bindings[node.name]
         return bound
+
+    def visit_MacroCommandNode(self, node):
+        # TODO: run command.
+        return IdentifierNode(Token('IDENTIFIER', '<command>', -1, -1))
 
 
 class MacroApplier(NodeTransformer):
@@ -923,7 +975,7 @@ class MacroApplier(NodeTransformer):
         'block':    BlockNode,
     }
 
-    def macro_node_matches(self, macro_node, ast_node):
+    def binding_node_matches(self, macro_node, ast_node):
         # No filters == immediate match
         if len(macro_node.filters) == 0:
             return True
@@ -950,7 +1002,7 @@ class MacroApplier(NodeTransformer):
     def compare_matches(self, block, node, bindings=None):
         # To determine if the given match does in fact match the given node, we
         # compare each node with each other, including special logic for
-        # MacroNodes.
+        # macro nodes.
 
         if bindings is None:
             bindings = {}
@@ -960,14 +1012,20 @@ class MacroApplier(NodeTransformer):
             if ast_node is None:
                 return False, None
 
-            # If the block node is a macro node - i.e. one of the special $(x)
-            # variables - then it's always equal.
-            if isinstance(match_node, MacroNode):
-                if self.macro_node_matches(match_node, ast_node):
+            # If the block node is a macro binding node - i.e. one of the
+            # special $(x) variables - then it's equal if filters match.
+            if isinstance(match_node, MacroBindingNode):
+                if self.binding_node_matches(match_node, ast_node):
                     bindings[match_node.name] = ast_node
+                    ast_node = ast_node.next
                     continue
                 else:
                     return False, None
+
+            # Command nodes should never be in the 'match' block.
+            elif isinstance(match_node, MacroCommandNode):
+                raise MacroError("Found macro command in 'match' block - this "
+                                 "should never happen")
 
             # Compare the current block node and AST node.
             # Note: we check this before comparing blocks so that we catch
@@ -1002,6 +1060,8 @@ class MacroApplier(NodeTransformer):
             if node.identifier != name:
                 continue
 
+            log.debug("Found macro invocation: %s", name)
+
             # To determine visibility, we need the 'macro parent' node - i.e.
             # the node in which the macro and macro's block are found.  Also,
             # the contents of 'all_blocks' are each of the 'case' blocks that
@@ -1018,6 +1078,7 @@ class MacroApplier(NodeTransformer):
 
             # Actually check visibility.
             if not is_macro_visible_from(macro_node, node):
+                log.debug("Macro is not visible")
                 continue
 
             # The invocation is correct.  See if one of the block's match
