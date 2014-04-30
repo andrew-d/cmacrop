@@ -11,16 +11,16 @@ implementation in Python.
 
 ## FAQ
 
-- *Q: Why did you rewrite this in Python?*
-- A: I wanted to use something that didn't require a bunch of tooling, frankly.
+- **Q: Why did you rewrite this in Python?**  
+  A: I wanted to use something that didn't require a bunch of tooling, frankly.
   The original project is far more elegant, and currently has more features
   implemented, but it requires one to compile two binaries (the lexer and the
   macro processor), requiring [SBCL](http://en.wikipedia.org/wiki/Steel_Bank_Common_Lisp)
   and a C compiler.  I wanted a single file that I could drop into an existing
   project without requiring the Lisp toolchain.
 
-- *Q: Why would you use this?*
-- A: For answers to this, I refer you to the original [cmacro readme](https://github.com/eudoxia0/cmacro),
+- **Q: Why would you use this?**  
+  A: For answers to this, I refer you to the original [cmacro readme](https://github.com/eudoxia0/cmacro),
   which is an excellent introduction to what macros are and why they're useful.
 
 ## Usage
@@ -28,10 +28,10 @@ implementation in Python.
 - Download `cmacro.py`, either by cloning the repository or using
   [this link](https://github.com/andrew-d/cmacrop/raw/master/cmacro.py).
 - Ensure you have Python 2.7+ installed on your computer
-- Run it:
-      python cmacro.py [command] file.c
-  For example:
-      python cmacro.py expand file_with_macros.c > expanded.c
+- Run it:  
+      `python cmacro.py [command] file.c`  
+  For example:  
+      `python cmacro.py expand file_with_macros.c > expanded.c`
 
 For more usage information, refer to the help: `python cmacro.py --help`
 
