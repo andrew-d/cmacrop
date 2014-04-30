@@ -527,7 +527,6 @@ def print_ast(ast):
 ## MACRO PROCESSING
 
 
-# TODO: add line number and column number here
 class MacroError(Exception):
     def __init__(self, msg, line=-1, col=-1):
         self.msg  = 0
@@ -585,8 +584,12 @@ class MacroStripper(NodeTransformer):
         self.macro_blocks.append((name_node.identifier, bnode))
 
         # Set the 'strip from AST' flag which indicates that we should remove
-        # the next two nodes from the AST.
+        # the next two nodes from the AST (the name and block after the 'macro'
+        # keyword).
         self.strip = 2
+
+        # Explicitly remove this node too.
+        return None
 
     def visit_BlockNode(self, node):
         if self.check_strip():
@@ -614,7 +617,7 @@ def is_macro_visible_from(macro_node, block):
     """ Returns whether a macro node is visible from a given block, by walking
         the parent chain of the block and checking if the block the macro is
         defined in is in it.
-        TODO: return distance too?
+        TODO: return distance too, so we can support overloading macros?
     """
     def_block = macro_node.parent
     par = block
@@ -784,7 +787,9 @@ class MacroNodeCreator(NodeTransformer):
                 log.debug("Didn't find a command name after '@'")
                 return node
 
-            # TODO: thing
+            # TODO: actually support commands - break into MacroBindingNode and
+            #       MacroCommandNode?  If we do this, disallow command in the
+            #       match arm, only in 'template' and 'toplevel'.
             return node
 
         elif not all(isinstance(x, IdentifierNode) for x in blk.children):
@@ -827,7 +832,7 @@ def parse_single_macro(block):
     for case in visitor.cases:
         all_blocks.append(parse_case(case))
 
-    # For each case, turn '$' '(' <block> ')' into a new macro node.
+    # For each case, turn '$' '(' <something> ')' into a new macro node.
     tform = MacroNodeCreator()
     for blocks in all_blocks:
         for ty, block in blocks.items():
@@ -840,6 +845,9 @@ def parse_single_macro(block):
 def parse_macros(macros):
     ret = []
     for name, macro_block in macros:
+        # TODO: need to determine how we support multiple definitions of
+        #       macros, in case we want to, e.g. allow overloading a macro.
+        #       See notes in is_macro_visible_from, esp. regarding distance.
         ret.append((name, parse_single_macro(macro_block)))
 
     return ret
@@ -1291,6 +1299,9 @@ def main():
                                help='be more quiet')
     parent_parser.add_argument('--verbose', '-v', action='store_true',
                                help='be more verbose')
+    # TODO: add preprocessing step, argument to control preprocessor, and
+    #       argument(s?) to pass flags to preprocessor
+    # TODO: add -o / --output flag to determine where to write to
 
     lex_parser = subparsers.add_parser('lex', parents=[parent_parser],
                                        help='lex the input file, and print '
