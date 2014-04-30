@@ -775,7 +775,22 @@ class MacroNodeCreator(NodeTransformer):
         if len(blk.children) < 1:
             log.debug("No children in () block")
             return node
-        if not all(isinstance(x, IdentifierNode) for x in blk.children):
+
+        # If the first thing in the block is a '@' operator, then this is a
+        # command.  Otherwise, everything should be an identifier.
+        if (isinstance(blk.children[0], OperatorNode) and
+            blk.children[0].operator == '@'):
+            if len(blk.children) < 2:
+                log.debug("Didn't find a command name after '@'")
+                return node
+
+            # TODO: thing
+            return node
+
+        elif not all(isinstance(x, IdentifierNode) for x in blk.children):
+            log.debug("Non-identifier found in () block: %r",
+                      [x for x in blk.children
+                       if not isinstance(x, IdentifierNode)])
             return node
 
         names = list(map(lambda n: n.identifier, blk.children))
