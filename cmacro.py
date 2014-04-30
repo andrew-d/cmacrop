@@ -21,7 +21,8 @@ log.addHandler(logging.NullHandler())
 
 
 def add_metaclass(metaclass):
-    """ Class decorator for creating a class with a metaclass.
+    """ Class decorator for creating a class with a metaclass that supports
+        both Python 2 and 3.
 
         Taken with thanks from 'six':
         https://bitbucket.org/gutworth/six/src/4420499da4959da591043652e50bf75f2d3398f7/six.py?at=default
@@ -672,6 +673,7 @@ class CaseVisitor(NodeVisitor):
     def generic_visit(self, node):
         # Something that's not a block or identifier node is an error.
         if node.token is None:
+            log.warn("Found node with no token: %r", node)
             ty = 'UNKNOWN'
             val = 'UNKNOWN'
         else:
@@ -763,12 +765,15 @@ class MacroNodeCreator(NodeTransformer):
         # The next token should be a bracket block token.
         blk = node.next
         if blk is None:
+            log.debug("No node found after '$'")
             return node
         if not (isinstance(blk, BlockNode) and blk.type == '('):
+            log.debug("Node after '$' isn't a () block")
             return node
 
-        # All things in the block should be identifiers.
+        # Should have at least one child of the () block.
         if len(blk.children) < 1:
+            log.debug("No children in () block")
             return node
         if not all(isinstance(x, IdentifierNode) for x in blk.children):
             return node
