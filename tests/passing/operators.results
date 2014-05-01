@@ -1,0 +1,18 @@
+OPERATOR	1	1	!
+
+# ... should be lexed as a single operator, not 3 dots
+OPERATOR	2	1	...
+
+# Semicolons should always be one operator.
+OPERATOR	3	1	;
+OPERATOR	3	2	;
+
+# Same with commas
+OPERATOR	4	1	,
+OPERATOR	4	2	,
+OPERATOR	5	1	.
+
+# Other operators should be lexed as one block
+OPERATOR	6	1	->
+OPERATOR	7	1	<->
+OPERATOR	8	1	<<<<<<!!!>>>>>>
