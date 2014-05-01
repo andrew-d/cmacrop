@@ -510,6 +510,11 @@ def make_ast(tokens):
         else:
             raise RuntimeError("Unknown token type: %s" % (token.type,))
 
+    # Check for unbalanced parentheses.
+    if curr is not root:
+        raise ValueError("Unbalanced block detected (%d/%d)",
+                         curr.token.line, curr.token.col)
+
     return root
 
 
@@ -556,7 +561,7 @@ def print_ast(ast, out=sys.stdout):
 
 class MacroError(Exception):
     def __init__(self, msg, line=-1, col=-1):
-        self.msg  = 0
+        self.msg  = msg
         self.line = line
         self.col  = col
         Exception.__init__(self, msg)
